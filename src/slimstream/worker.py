@@ -128,6 +128,31 @@ def _process_one(
     try:
         manifest.transition(record.file_id, STATE_COMPRESSING)
 
+        # Manifest-loss recovery: if a compressed copy already exists at
+        # this file's mirrored path, this file was already fully
+        # processed at some point and the manifest just doesn't know it
+        # (e.g. sqlite db lost/reset). Check by path alone, before
+        # downloading anything — the whole point of mirroring compressed
+        # output under a separate root (not mixed into MEGA_CAMERA_PATH)
+        # is that this check needs no manifest state to be trustworthy.
+        compressed_path = config.compressed_path_for(record.original_path)
+        existing = mega.stat(compressed_path)
+        if existing is not None and existing.size > 0:
+            logger.info(
+                "compressed copy already present at %s; skipping re-processing of %s",
+                compressed_path,
+                record.original_path,
+            )
+            manifest.transition(
+                record.file_id,
+                STATE_COMPRESSED,
+                compressed_path=compressed_path,
+                compressed_size=existing.size,
+            )
+            manifest.transition(record.file_id, STATE_UPLOADED, node_handle=existing.node_handle)
+            manifest.transition(record.file_id, STATE_VERIFIED)
+            return
+
         local_input = mega.download(record.original_path, scratch)
 
         content_hash = compute_content_hash(local_input)
@@ -177,21 +202,40 @@ def _process_one(
                 quality=config.image_quality,
             )
 
+        # Compressed output lands in a mirrored tree under
+        # MEGA_COMPRESSED_ROOT, never back into MEGA_CAMERA_PATH — this is
+        # what makes "already compressed?" answerable by path alone (see
+        # the pre-download check above) instead of depending on manifest
+        # state that can be lost.
+        remote_compressed_path = config.compressed_path_for(record.original_path)
+        remote_dir = remote_compressed_path.rsplit("/", 1)[0]
+        remote_name = remote_compressed_path.rsplit("/", 1)[-1]
+
+        # mega.upload() names the remote file after the local basename, so
+        # rename the local scratch file to the original's name before
+        # upload — the mirrored tree keeps identical filenames to
+        # MEGA_CAMERA_PATH, just under a different root.
+        upload_source = result.output_path.with_name(remote_name)
+        result.output_path.rename(upload_source)
+        local_output = upload_source
+
         manifest.transition(
             record.file_id,
             STATE_COMPRESSED,
-            compressed_path=str(result.output_path),
+            compressed_path=remote_compressed_path,
             compressed_size=result.output_size,
             content_sha256=content_hash,
         )
 
-        remote_dir = record.original_path.rsplit("/", 1)[0]
         if config.dry_run_upload:
-            logger.info("[dry-run-upload] would upload %s to %s", result.output_path, remote_dir)
+            logger.info(
+                "[dry-run-upload] would upload %s to %s", upload_source, remote_compressed_path
+            )
             cleanup(local_input, local_output)
             return
 
-        remote_path = mega.upload(result.output_path, remote_dir)
+        mega.mkdir_p(remote_dir)
+        remote_path = mega.upload(upload_source, remote_dir)
 
         # Verify: re-stat the uploaded copy — present, non-zero (spec 1.7
         # step d) — before recording UPLOADED, so the node_handle stamped

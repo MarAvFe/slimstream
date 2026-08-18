@@ -67,6 +67,18 @@ Mitigations required in `mega_client`:
 - **Parse strictly and fail loud.** A line that doesn't match the expected shape raises — it is never skipped silently. A silently-skipped file is an invisible data-loss path.
 - Contract-test the parser against captured real output fixtures (Phase 0 produces these).
 
+### D5 — Compressed output lands in a mirrored tree, not next to the original (resolved, 2026-08-18)
+
+Originally, Job A uploaded the compressed copy into the **same folder** as the original (`Camera Uploads`). This created a real gap: if the manifest sqlite db were ever lost, a rediscovery run would see the original *and* the compressed copy as two new, indistinguishable `discovered` files — re-downloading/re-transcoding the original (wasted work) and attempting to compress the already-compressed file too (a real quality problem, not just waste), since nothing in the file itself marked it as "already done."
+
+**Decision:** `MEGA_COMPRESSED_ROOT` (must differ from `MEGA_CAMERA_PATH`, enforced at config load). Compressed output mirrors the original's path 1:1 under this separate root — same relative path, same filename, different top-level folder. `config.compressed_path_for(original_path)` computes the mirror.
+
+Two benefits, one basically free once the other is chosen:
+1. **Browsable.** The compressed tree has the identical folder structure and filenames as `Camera Uploads`, so finding a compressed copy of a known original is just swapping the root — no date-bucketing scheme needed, and no dependency on a timestamp field (which A3 already showed is unreliable — Mega's reported time is upload time, not EXIF capture time — so bucketing by "year/month" would have inherited that same problem).
+2. **Manifest-loss resilient.** `_process_one` now checks, *before downloading anything*, whether a file already exists at the mirrored path via a plain `stat()`. If it does, the record short-circuits straight to `verified` — no download, no re-transcode, no re-upload. This check needs zero manifest state to be trustworthy, because "already compressed" is now a fact about *where a file lives*, not something only the manifest remembers.
+
+This doesn't replace the D2 nightly manifest export (still worth having, for full state — retry counts, failure history, etc.) — it specifically closes the worst failure mode of manifest loss: silent double-processing of already-compressed media.
+
 ---
 
 ## Phase 0 — The assumption gate (human-run, before any pipeline code)
@@ -132,7 +144,9 @@ slimstream/
 3. Config via env vars with validation **at startup, not at use** — a bad `RETENTION_DAYS` must fail before any file is touched, not midway through a delete loop.
 
 ### Config surface (all defaults from spec 1.9 / 1.8)
-`MEGA_CAMERA_PATH`, `MEGA_KEEPERS_PATH`, `MEGA_TRASH_PATH`, `RETENTION_DAYS=30`, `RETENTION_RUN_DAY=30`, `RETENTION_KEY=discovered_at`, `VIDEO_HEIGHT=480`, `VIDEO_CRF=30`, `IMAGE_LONG_EDGE=1200`, `IMAGE_QUALITY=60`, `SCRATCH_DIR`, `MANIFEST_DB_PATH`, `LOG_DIR`, `DRY_RUN_UPLOAD=true`, `DRY_RUN_DELETE=true`, `SETTLING_MINUTES`, `MAX_BATCH_SIZE=100`.
+`MEGA_CAMERA_PATH`, `MEGA_KEEPERS_PATH`, `MEGA_TRASH_PATH`, `MEGA_COMPRESSED_ROOT`, `RETENTION_DAYS=30`, `RETENTION_RUN_DAY=30`, `RETENTION_KEY=discovered_at`, `VIDEO_HEIGHT=480`, `VIDEO_CRF=30`, `IMAGE_LONG_EDGE=1200`, `IMAGE_QUALITY=60`, `SCRATCH_DIR`, `MANIFEST_DB_PATH`, `LOG_DIR`, `DRY_RUN_UPLOAD=true`, `DRY_RUN_DELETE=true`, `SETTLING_MINUTES`, `MAX_BATCH_SIZE=100`.
+
+**`MEGA_COMPRESSED_ROOT` (D5) is where compressed copies actually land — never back into `MEGA_CAMERA_PATH`.** Must differ from `MEGA_CAMERA_PATH`, enforced at config load. See D5 above for the full rationale (browsability + manifest-loss resilience).
 
 `VIDEO_CRF` is ffmpeg's libx264 Constant Rate Factor (spec 1.9) — the quality/size dial, roughly logarithmic, lower = larger/better, ~18 "visually lossless," ~23 the libx264 default. Tuned by visual comparison against real footage (2026-08-18, `scripts/tune_transcode.py`): CRF 30 confirmed as an acceptable tradeoff — CRF 23 looked better but saved far less space, working against the project's actual goal. `IMAGE_LONG_EDGE` similarly tuned down from spec 1.9's original 1600 to 1200.
 

@@ -197,6 +197,13 @@ class MegaClient:
             )
         return local_path
 
+    def mkdir_p(self, remote_dir: str) -> None:
+        """Create a remote directory, including parents, if it doesn't
+        already exist. Used before uploading into the mirrored compressed
+        tree, since MEGAcmd's `put` doesn't create missing parent folders.
+        """
+        _run([self._bin("mkdir"), "-p", remote_dir])
+
     def upload(self, local_path: Path, remote_dir: str) -> str:
         """Upload a local file to a remote directory. Returns the resulting
         remote path (caller should verify via stat() afterward — see

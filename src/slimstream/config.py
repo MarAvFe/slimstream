@@ -24,6 +24,7 @@ class Config:
     mega_camera_path: str
     mega_keepers_path: str
     mega_trash_path: str
+    mega_compressed_root: str
 
     retention_days: int
     retention_run_day: int
@@ -47,6 +48,24 @@ class Config:
     def manifest_export_path(self) -> str:
         """Remote Mega path for the nightly manifest export (D2)."""
         return f"{self.mega_trash_path.rsplit('/', 1)[0]}/slimstream-manifest-export.json"
+
+    def compressed_path_for(self, original_path: str) -> str:
+        """Mirror an original's path under mega_compressed_root, preserving
+        everything after mega_camera_path.
+
+        This is what makes "is this file already compressed?" answerable
+        by a single stat() against a predictable path, with no dependency
+        on manifest state — the strongest defense against manifest loss
+        (a lost sqlite db previously meant compressed copies looked
+        identical to undiscovered originals, risking double-compression).
+        """
+        camera_root = self.mega_camera_path.rstrip("/")
+        if not original_path.startswith(camera_root + "/"):
+            raise ValueError(
+                f"{original_path!r} is not under MEGA_CAMERA_PATH {camera_root!r}"
+            )
+        relative = original_path[len(camera_root) :]
+        return f"{self.mega_compressed_root.rstrip('/')}{relative}"
 
 
 def _require(env: dict[str, str], key: str) -> str:
@@ -86,6 +105,13 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     mega_camera_path = _require(env, "MEGA_CAMERA_PATH")
     mega_keepers_path = _require(env, "MEGA_KEEPERS_PATH")
     mega_trash_path = _require(env, "MEGA_TRASH_PATH")
+    mega_compressed_root = _require(env, "MEGA_COMPRESSED_ROOT")
+    if mega_compressed_root.rstrip("/") == mega_camera_path.rstrip("/"):
+        raise ConfigError(
+            "MEGA_COMPRESSED_ROOT must differ from MEGA_CAMERA_PATH — "
+            "compressed copies landing in the same tree as originals is "
+            "exactly the ambiguity this setting exists to avoid"
+        )
 
     retention_days = _parse_int(env, "RETENTION_DAYS", default=30)
     if retention_days <= 0:
@@ -153,6 +179,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         mega_camera_path=mega_camera_path,
         mega_keepers_path=mega_keepers_path,
         mega_trash_path=mega_trash_path,
+        mega_compressed_root=mega_compressed_root,
         retention_days=retention_days,
         retention_run_day=retention_run_day,
         retention_key=retention_key,

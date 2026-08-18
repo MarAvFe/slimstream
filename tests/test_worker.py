@@ -30,6 +30,7 @@ def make_config(tmp_path, **overrides) -> Config:
         mega_camera_path="/Camera Uploads",
         mega_keepers_path="/Camera Uploads/keepers",
         mega_trash_path="/slimstream-trash",
+        mega_compressed_root="/Camera Uploads Compressed",
         retention_days=30,
         retention_run_day=30,
         retention_key="captured_at",
@@ -57,12 +58,25 @@ class FakeMegaClient:
         self._local_bytes = local_bytes
         self.moved_to_trash: list[tuple[str, str]] = []
         self.uploaded: list[tuple[str, str]] = []
+        self.downloaded: list[str] = []
         self._uploaded_stats: dict[str, RemoteEntry] = {}
 
     def list(self, remote_path: str) -> list[RemoteEntry]:
         return list(self._entries)
 
+    def mkdir_p(self, remote_dir: str) -> None:
+        pass  # no-op: FakeMegaClient has no real directory concept
+
+    def seed_stat(self, remote_path: str, entry: RemoteEntry) -> None:
+        """Pre-populate a stat() result without going through upload() —
+        for testing the manifest-loss-recovery short-circuit, which must
+        find an already-compressed file at a path it never uploaded to
+        itself this run.
+        """
+        self._uploaded_stats[remote_path] = entry
+
     def download(self, remote_path: str, local_dir: Path) -> Path:
+        self.downloaded.append(remote_path)
         local_dir.mkdir(parents=True, exist_ok=True)
         local_path = local_dir / remote_path.rsplit("/", 1)[-1]
         # Content must differ per remote path, or content_sha256 dedup
@@ -145,6 +159,13 @@ def test_job_a_discovers_and_marks_verified_when_not_dry_run(tmp_path, manifest)
     assert len(all_rows) == 1
     assert all_rows[0]["state"] == STATE_VERIFIED
     assert len(mega.uploaded) == 1
+    # Compressed copy lands in the mirrored tree under
+    # MEGA_COMPRESSED_ROOT, same filename as the original, not back into
+    # MEGA_CAMERA_PATH next to it.
+    local_path, remote_dir = mega.uploaded[0]
+    assert remote_dir == "/Camera Uploads Compressed"
+    assert local_path.endswith("IMG_0001.jpg")
+    assert all_rows[0]["compressed_path"] == "/Camera Uploads Compressed/IMG_0001.jpg"
 
 
 def test_job_a_dry_run_never_uploads(tmp_path, manifest):
@@ -242,6 +263,54 @@ def test_job_a_rerun_is_idempotent_no_duplicate_processing(tmp_path, manifest):
     assert len(mega.uploaded) == 1  # not re-uploaded
     count = manifest._conn.execute("SELECT COUNT(*) c FROM files").fetchone()["c"]
     assert count == 1
+
+
+def test_job_a_recovers_from_manifest_loss_via_mirrored_path(tmp_path, manifest):
+    """If the manifest is lost/reset, a file whose compressed copy already
+    exists at its mirrored path (MEGA_COMPRESSED_ROOT) must be recognized
+    as already-done by path alone, without downloading or re-transcoding —
+    this is the whole point of a separate mirrored root instead of
+    uploading compressed copies back into MEGA_CAMERA_PATH.
+    """
+    config = make_config(
+        tmp_path,
+        dry_run_upload=False,
+        mega_compressed_root="/Camera Uploads Compressed",
+    )
+    entries = [
+        RemoteEntry(
+            path="/Camera Uploads/IMG_0099.jpg",
+            size=2048,
+            is_dir=False,
+            node_handle="H:FFFFFFFF",
+            mtime_iso="2026-01-01T00:00:00Z",
+        )
+    ]
+    mega = FakeMegaClient(entries)
+    # Simulate: this file was already compressed in some prior run whose
+    # manifest is now gone — the compressed copy exists on Mega, but
+    # nothing in *this* fresh manifest/FakeMegaClient knows about it via
+    # the normal upload() bookkeeping.
+    mega.seed_stat(
+        "/Camera Uploads Compressed/IMG_0099.jpg",
+        RemoteEntry(
+            path="/Camera Uploads Compressed/IMG_0099.jpg",
+            size=512,
+            is_dir=False,
+            node_handle="H:PRIOR0001",
+            mtime_iso="2025-01-01T00:00:00Z",
+        ),
+    )
+
+    run_job_a(manifest, mega, config)
+
+    assert mega.downloaded == []  # never downloaded the original
+    assert mega.uploaded == []  # never re-uploaded
+
+    row = manifest._conn.execute("SELECT * FROM files").fetchone()
+    assert row["state"] == STATE_VERIFIED
+    assert row["compressed_path"] == "/Camera Uploads Compressed/IMG_0099.jpg"
+    assert row["compressed_size"] == 512
 
 
 def _make_entries(n: int, prefix: str = "IMG") -> list[RemoteEntry]:

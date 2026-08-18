@@ -8,6 +8,7 @@ BASE_ENV = {
     "MEGA_CAMERA_PATH": "/Camera Uploads",
     "MEGA_KEEPERS_PATH": "/Camera Uploads/keepers",
     "MEGA_TRASH_PATH": "/slimstream-trash",
+    "MEGA_COMPRESSED_ROOT": "/Camera Uploads Compressed",
     "SCRATCH_DIR": "/tmp/scratch",
     "MANIFEST_DB_PATH": "/tmp/manifest.db",
 }
