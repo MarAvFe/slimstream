@@ -155,10 +155,11 @@ def transcode_image(
     input_path: Path,
     output_path: Path,
     *,
-    long_edge: int = 1600,
+    long_edge: int = 1200,
     quality: int = 60,
 ) -> TranscodeResult:
-    """spec 1.9 STILL command. HEIC inputs need libheif-enabled ImageMagick
+    """spec 1.9 STILL command (long_edge tuned to 1200 from the original
+    1600, see .env.example). HEIC inputs need libheif-enabled ImageMagick
     (A4) — if that's unavailable on the target system, pre-convert with
     heif-convert before calling this (branch point, not handled here).
     """

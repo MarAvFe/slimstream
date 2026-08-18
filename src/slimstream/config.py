@@ -112,7 +112,8 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     if not (0 <= video_crf <= 51):
         raise ConfigError(f"VIDEO_CRF must be 0-51 (libx264 range), got {video_crf}")
 
-    image_long_edge = _parse_int(env, "IMAGE_LONG_EDGE", default=1600)
+    # 1200, not spec 1.9's original 1600 — see .env.example for tuning notes
+    image_long_edge = _parse_int(env, "IMAGE_LONG_EDGE", default=1200)
     if image_long_edge <= 0:
         raise ConfigError(f"IMAGE_LONG_EDGE must be positive, got {image_long_edge}")
 
