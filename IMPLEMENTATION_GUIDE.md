@@ -97,13 +97,13 @@ Use a **throwaway Mega folder with junk files**, never real memories.
 
 | Result | Design consequence |
 |---|---|
-| A2 (either result) | Informational only (D4a). Logged for the record; does not change `mega_client`. |
-| A2b false (handle changes) | Confirms D1: handle is an address, not identity. Re-resolve by path before every op. |
-| A1 false | Add re-auth step + secure credential storage to `mega_client`. |
-| A3 false | Retention keys off `discovered_at`, not `captured_at`. **Changes Job B's core query.** |
-| A4 false | `transcoder` needs a per-format branch + `heif-convert` pre-step. |
-| A5 false | Add settling window: skip files modified < N minutes ago. |
-| A6 unstable | Harden parser; pin version; expand fixtures. |
+| A2 — **run, informational** | `mega-rm`'d file did not appear in `/Rubbish`, and `/Rubbish` isn't even a resolvable CLI path on this account. Confirms D4a was the right call: Job B never depended on `rm`/Rubbish semantics, and this result shows why — they're not reliably observable at all, let alone documented. No change (D4a already used `mv`). |
+| A2b — **run, confirmed true** | Node handle survived a `mega-mv`. Handles are more stable than assumed; D1's synthetic `file_id` remains the PK regardless (no reason to weaken it), but `node_handle` can be trusted as a real address, not just a best-effort one. |
+| A1 — **run, confirmed true** (done during infra setup) | Session survived a full VM reboot without re-login. No change needed. |
+| A3 — **run, false** | `--show-creation-time`/`--time-format` report Mega's upload/file timestamp, not EXIF capture date — confirmed by testing against files re-uploaded via `mega-get`+`mega-put`, where the reported date tracked the re-upload, not the original photo. **Retention now defaults to `discovered_at`** (config.py, .env.example) instead of `captured_at`. `captured_at` remains a selectable option for setups that verify it's accurate for their upload path, but it is no longer safe to assume. |
+| A4 — **skipped**, not applicable | No HEIC media in this deployer's library. The HEIC/heif-convert branch in `transcoder.py` remains unimplemented; add it only if a deployer's phone actually produces HEIC. |
+| A5 — **skipped**, deferred | Mid-upload race not tested. `SETTLING_MINUTES` config exists as the intended mitigation but isn't wired into discovery logic yet — treat as an open risk, not a confirmed-safe gap. |
+| A6 — **run, format captured and parser fixed** | Real `mega-ls -l --show-handles` output differs substantially from the guide's original guess: `FLAGS` is 4 dashes (`----`) not a 10-char `-rwx...` string, `DATE` has no time component despite `--time-format=ISO6081`, and `NAME` can contain spaces (Pixel's own `"2026-08-03 10.10.48.jpg"` filenames). `mega_client.py`'s parser was rewritten against the real captured fixture (`tests/fixtures/ls_output_sample.txt`) and verified against the live droplet directly, not just the fixture. Directory-flag shape is still unconfirmed (no directories were in the test sample) — the parser deliberately raises rather than guesses if one is encountered. |
 
 **Deliverable:** `docs/assumptions-results.md` — each row with date, command run, raw output, verdict, and resulting decision. Commit the captured output as test fixtures.
 
@@ -225,16 +225,20 @@ Query, run once per invocation: `state == verified AND <retention_key> < now - R
 
 ---
 
-## Appendix — Open items still owned by Phase 0
+## Appendix — Phase 0 status
 
-| Item | Resolved by |
+Run 2026-08-18 against a live Mega account and the provisioned droplet.
+
+| Item | Status |
 |---|---|
-| Retention key: `captured_at` vs `discovered_at` | A3 |
-| Node handle stability across a move | A2b |
-| Settling window duration | A5 |
-| Per-format transcode branches | A4 |
-| Parser strictness / fixture coverage | A6 |
+| Retention key: `captured_at` vs `discovered_at` | **Resolved by A3** — defaults to `discovered_at` (config.py, .env.example) |
+| Node handle stability across a move | **Resolved by A2b** — confirmed stable |
+| `mega-rm`/Rubbish semantics | **Resolved by A2** — informational, doesn't matter (D4a) |
+| Parser strictness / fixture coverage | **Resolved by A6** — `mega_client.py` parser rewritten against real captured output, verified live |
+| Session persistence across reboot | **Resolved by A1** — confirmed during infra setup |
+| Settling window duration | **Still open — A5 skipped.** `SETTLING_MINUTES` config exists but isn't wired into discovery logic. Treat mid-upload races as an unmitigated risk until tested. |
+| Per-format transcode branches (HEIC) | **Not applicable for this deployer** — no HEIC in their library. `transcoder.py` has no heif-convert branch; add one before deploying for a phone that produces HEIC. |
 
-(Trash mechanism and delete cadence are no longer open — see D4a and D4b.)
+(Trash mechanism and delete cadence were never gated on Phase 0 — see D4a and D4b, decided independently of these tests.)
 
 Each is a one-line change *if* resolved before Phase 2. Each is a refactor across multiple modules if discovered afterward — which is the entire argument for the gate.

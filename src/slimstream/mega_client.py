@@ -26,6 +26,10 @@ from pathlib import Path
 
 MEGACMD_TIME_FORMAT = "ISO6081"
 
+# Header row emitted by `mega-ls -l`, used to detect/skip it defensively
+# (see _parse_ls_line docstring for why we don't rely on line position).
+_LS_HEADER_PREFIX = "FLAGS"
+
 
 class MegaClientError(RuntimeError):
     """A mega-* command failed or its output could not be parsed."""
@@ -48,20 +52,26 @@ class RemoteEntry:
     mtime_iso: str
 
 
-# Matches `mega-ls -l --show-handles --time-format=ISO6081` output lines.
-# Real shape must be confirmed against captured fixtures (Phase 0 / A6);
-# this pattern is deliberately strict and documented so it fails loud
-# rather than silently mis-parsing when the real format differs.
+# Real `mega-ls -l --show-handles` output, captured against a live account
+# (Phase 0 / A6 — confirmed real, not guessed from docs, since MEGAcmd
+# documents no stable machine-readable format):
 #
-# Expected columns: FLAGS SIZE DATE HANDLE NAME
-# e.g.: "-rw-------  1234567  2026-01-15T10:22:03  H:AbCd1234  IMG_0001.jpg"
-_LS_LINE_RE = re.compile(
-    r"^(?P<flags>[-dl][-rwx]{9})\s+"
-    r"(?P<size>\d+)\s+"
-    r"(?P<mtime>\S+)\s+"
-    r"(?P<handle>H:[A-Za-z0-9_-]+)\s+"
-    r"(?P<name>.+)$"
-)
+#   FLAGS VERS      SIZE    DATE          HANDLE NAME
+#   ----    1      3470559 2026-08-03 H:GEFhiD7K 2026-08-03 10.10.48.jpg
+#   ----    1            4 2026-08-18 H:vdElBb7Y moved.txt
+#
+# Notable, non-obvious things this format forces on the parser:
+# - FLAGS is 4 dashes for a plain file, not the 10-char `-rwx...` shape a
+#   *nix `ls -l` would suggest. Directory flags are unconfirmed — treated
+#   as unparseable (raise) rather than guessed, per D4c.
+# - DATE has no time component (`2026-08-03`), not the ISO8601-with-time
+#   the guide assumed --time-format=ISO6081 would produce.
+# - NAME can itself contain spaces and even look like a date
+#   ("2026-08-03 10.10.48.jpg" — Pixel's own default filename format),
+#   so column-count splitting must split on the first 5 whitespace runs
+#   only and take everything after HANDLE as NAME, whole.
+_LS_FLAGS_RE = re.compile(r"^[-d]{4}$")
+_LS_MIN_FIELDS = 6  # FLAGS VERS SIZE DATE HANDLE NAME(>=1 word)
 
 
 def _run(args: list[str], *, input_text: str | None = None, timeout: int = 300) -> str:
@@ -88,26 +98,39 @@ def _run(args: list[str], *, input_text: str | None = None, timeout: int = 300) 
 
 
 def _parse_ls_line(line: str, *, parent_path: str) -> RemoteEntry:
-    match = _LS_LINE_RE.match(line)
-    if match is None:
+    # FLAGS VERS SIZE DATE HANDLE NAME — split on the first 5 whitespace
+    # runs only, since NAME itself may contain spaces (see format notes
+    # above _LS_FLAGS_RE).
+    parts = line.split(maxsplit=5)
+    if len(parts) < _LS_MIN_FIELDS:
         raise MegaParseError(f"unrecognized mega-ls line shape: {line!r}")
 
-    flags = match.group("flags")
-    name = match.group("name")
-    is_dir = flags[0] == "d"
-    full_path = f"{parent_path.rstrip('/')}/{name}"
+    flags, _vers, size_str, mtime, handle, name = parts
+
+    if not _LS_FLAGS_RE.match(flags):
+        raise MegaParseError(f"unrecognized flags column {flags!r} in line: {line!r}")
+    if not handle.startswith("H:"):
+        raise MegaParseError(f"unrecognized handle column {handle!r} in line: {line!r}")
 
     try:
-        size = int(match.group("size"))
+        size = int(size_str)
     except ValueError as exc:
         raise MegaParseError(f"non-integer size in line: {line!r}") from exc
+
+    # Directory flag shape is unconfirmed against real output (Phase 0
+    # only exercised plain files) — deliberately not guessed. is_dir stays
+    # False here; a real directory listing will surface as a parse
+    # failure until this is confirmed and encoded explicitly.
+    is_dir = False
+
+    full_path = f"{parent_path.rstrip('/')}/{name}"
 
     return RemoteEntry(
         path=full_path,
         size=size,
         is_dir=is_dir,
-        node_handle=match.group("handle"),
-        mtime_iso=match.group("mtime"),
+        node_handle=handle,
+        mtime_iso=mtime,
     )
 
 
@@ -139,6 +162,15 @@ class MegaClient:
         for line in output.splitlines():
             line = line.strip()
             if not line:
+                continue
+            # Real output (A6) leads with a "/path/:" folder header line
+            # and a "FLAGS VERS SIZE DATE HANDLE NAME" column header —
+            # neither documented, both confirmed empirically. Skip by
+            # shape, not by line position, since either could in
+            # principle be absent (e.g. listing a single file).
+            if line.endswith(":") and "H:" not in line:
+                continue
+            if line.startswith(_LS_HEADER_PREFIX):
                 continue
             entries.append(_parse_ls_line(line, parent_path=remote_path))
         return entries

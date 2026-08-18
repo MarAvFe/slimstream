@@ -17,7 +17,7 @@ def test_loads_with_defaults():
     cfg = load_config(dict(BASE_ENV))
     assert cfg.retention_days == 30
     assert cfg.retention_run_day == 30
-    assert cfg.retention_key == "captured_at"
+    assert cfg.retention_key == "discovered_at"  # A3: Mega timestamp is upload time, not EXIF
     assert cfg.video_crf == 30
     assert cfg.dry_run is True
 

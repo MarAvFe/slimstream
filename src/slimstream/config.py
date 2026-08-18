@@ -94,7 +94,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
             f"RETENTION_RUN_DAY must be 1-31, got {retention_run_day}"
         )
 
-    retention_key = env.get("RETENTION_KEY", "captured_at").strip()
+    # Default is discovered_at, not captured_at: A3 (IMPLEMENTATION_GUIDE.md
+    # Phase 0) found that Mega's reported timestamp is upload/file time, not
+    # EXIF capture time — --show-creation-time does not surface EXIF data.
+    # captured_at remains selectable for setups where it's verified accurate.
+    retention_key = env.get("RETENTION_KEY", "discovered_at").strip()
     if retention_key not in _VALID_RETENTION_KEYS:
         raise ConfigError(
             f"RETENTION_KEY must be one of {_VALID_RETENTION_KEYS}, got {retention_key!r}"

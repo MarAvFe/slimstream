@@ -1,0 +1,7 @@
+/slimstream-test/:
+FLAGS VERS      SIZE    DATE          HANDLE NAME
+----    1      3470559 2026-08-03 H:GEFhiD7K 2026-08-03 10.10.48.jpg
+----    2      3470559 2026-08-18 H:bdlTzQYR edited-pic.jpg
+----    1      3470559 2026-08-03 H:mVlH1QhK errsc.jpg
+----    1            4 2026-08-18 H:vdElBb7Y moved.txt
+----    1      3814673 2026-08-03 H:6JtWmayA test-pic.jpg
