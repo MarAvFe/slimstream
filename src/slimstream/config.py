@@ -36,9 +36,11 @@ class Config:
 
     scratch_dir: Path
     manifest_db_path: Path
+    log_dir: Path
 
     settling_minutes: int
-    dry_run: bool
+    dry_run_upload: bool
+    dry_run_delete: bool
     max_batch_size: int
 
     @property
@@ -124,12 +126,24 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
     scratch_dir = Path(_require(env, "SCRATCH_DIR"))
     manifest_db_path = Path(_require(env, "MANIFEST_DB_PATH"))
+    # Defaults alongside the manifest db rather than /var/log — keeps
+    # everything the pipeline writes under one directory a deployer
+    # already controls permissions on.
+    log_dir = Path(env.get("LOG_DIR", "").strip() or manifest_db_path.parent / "logs")
 
     settling_minutes = _parse_int(env, "SETTLING_MINUTES", default=15)
     if settling_minutes < 0:
         raise ConfigError(f"SETTLING_MINUTES must be >= 0, got {settling_minutes}")
 
-    dry_run = _parse_bool(env, "DRY_RUN", default=True)
+    # Split, not one DRY_RUN: uploading a compressed copy is fully
+    # reversible (just an extra file in Mega, inspectable for quality
+    # before you trust it), but deleting an original is the one
+    # irreversible action in this whole pipeline (spec 1.6's invariant).
+    # These are independently controllable so Job A can run for real
+    # while Job B stays blocked — the guide's own rollout order (validate
+    # upload quality, *then* enable delete) depends on this separation.
+    dry_run_upload = _parse_bool(env, "DRY_RUN_UPLOAD", default=True)
+    dry_run_delete = _parse_bool(env, "DRY_RUN_DELETE", default=True)
 
     max_batch_size = _parse_int(env, "MAX_BATCH_SIZE", default=100)
     if max_batch_size <= 0:
@@ -148,7 +162,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         image_quality=image_quality,
         scratch_dir=scratch_dir,
         manifest_db_path=manifest_db_path,
+        log_dir=log_dir,
         settling_minutes=settling_minutes,
-        dry_run=dry_run,
+        dry_run_upload=dry_run_upload,
+        dry_run_delete=dry_run_delete,
         max_batch_size=max_batch_size,
     )

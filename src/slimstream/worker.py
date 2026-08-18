@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -38,6 +39,20 @@ from slimstream.manifest import compute_content_hash
 logger = logging.getLogger("slimstream.worker")
 
 MAX_RETRIES = 5
+
+
+@dataclass(frozen=True)
+class JobAResult:
+    discovered: int  # newly inserted this run (0 on a rerun over the same listing)
+    processed: int
+    parked_for_retries: int
+    still_pending: int
+
+
+@dataclass(frozen=True)
+class JobBResult:
+    moved_to_trash: int
+    failed_to_move: int
 
 
 class PausedError(Exception):
@@ -171,8 +186,8 @@ def _process_one(
         )
 
         remote_dir = record.original_path.rsplit("/", 1)[0]
-        if config.dry_run:
-            logger.info("[dry-run] would upload %s to %s", result.output_path, remote_dir)
+        if config.dry_run_upload:
+            logger.info("[dry-run-upload] would upload %s to %s", result.output_path, remote_dir)
             cleanup(local_input, local_output)
             return
 
@@ -200,7 +215,7 @@ def _process_one(
             cleanup(local_output)
 
 
-def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> None:
+def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> JobAResult:
     """Discovery always runs to completion — the manifest must reflect
     the full remote listing on every run, never a partial view. Only the
     processing step (download/transcode/upload) is capped per invocation
@@ -214,7 +229,7 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> None:
     """
     _check_not_paused(manifest)
 
-    run_discovery(manifest, mega, config)
+    discovered = run_discovery(manifest, mega, config)
 
     pending = manifest.get_pending()
     processed = 0
@@ -234,12 +249,18 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> None:
         _process_one(record, manifest, mega, config)
         processed += 1
 
-    remaining = len(pending) - processed - skipped_for_retries
+    remaining = max(len(pending) - processed - skipped_for_retries, 0)
     logger.info(
         "job A: processed %d, parked %d (max retries), %d still pending for next run",
         processed,
         skipped_for_retries,
-        max(remaining, 0),
+        remaining,
+    )
+    return JobAResult(
+        discovered=discovered,
+        processed=processed,
+        parked_for_retries=skipped_for_retries,
+        still_pending=remaining,
     )
 
 
@@ -256,7 +277,7 @@ def should_run_job_b_today(config: Config, today: datetime | None = None) -> boo
     return today.day == _clamped_run_day(config.retention_run_day, today)
 
 
-def run_job_b(manifest: Manifest, mega: MegaClient, config: Config) -> None:
+def run_job_b(manifest: Manifest, mega: MegaClient, config: Config) -> JobBResult:
     """Monthly retention delete (D4b). Independent of Job A."""
     _check_not_paused(manifest)
 
@@ -265,19 +286,27 @@ def run_job_b(manifest: Manifest, mega: MegaClient, config: Config) -> None:
 
     deletable = manifest.get_deletable(cutoff_iso, retention_key=config.retention_key)
 
+    moved = 0
+    failed = 0
+
     for record in deletable:
-        if config.dry_run:
+        if config.dry_run_delete:
             logger.info(
-                "[dry-run] would move %s to %s", record.original_path, config.mega_trash_path
+                "[dry-run-delete] would move %s to %s", record.original_path, config.mega_trash_path
             )
             continue
         try:
             mega.move_to_trash(record.original_path, config.mega_trash_path)
             manifest.transition(record.file_id, STATE_ORIGINAL_DELETED)
             logger.info("moved to trash: %s", record.original_path)
+            moved += 1
         except Exception:  # noqa: BLE001
             logger.exception("failed to move %s to trash; leaving as verified", record.file_id)
             # Deliberately do NOT transition to failed here: 'verified' has
             # no outgoing edge to 'failed' in the state machine (spec 1.6),
             # and a delete failure should just be retried next run, not
             # treated as a pipeline defect requiring backoff.
+            failed += 1
+
+    logger.info("job B: moved %d to trash, %d failed to move", moved, failed)
+    return JobBResult(moved_to_trash=moved, failed_to_move=failed)

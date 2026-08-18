@@ -39,8 +39,10 @@ def make_config(tmp_path, **overrides) -> Config:
         image_quality=60,
         scratch_dir=tmp_path / "scratch",
         manifest_db_path=tmp_path / "manifest.db",
+        log_dir=tmp_path / "logs",
         settling_minutes=15,
-        dry_run=True,
+        dry_run_upload=True,
+        dry_run_delete=True,
         max_batch_size=100,
     )
     defaults.update(overrides)
@@ -122,7 +124,7 @@ def patch_transcoders(monkeypatch):
 
 
 def test_job_a_discovers_and_marks_verified_when_not_dry_run(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False)
+    config = make_config(tmp_path, dry_run_upload=False)
     entries = [
         RemoteEntry(
             path="/Camera Uploads/IMG_0001.jpg",
@@ -146,7 +148,7 @@ def test_job_a_discovers_and_marks_verified_when_not_dry_run(tmp_path, manifest)
 
 
 def test_job_a_dry_run_never_uploads(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=True)
+    config = make_config(tmp_path, dry_run_upload=True)
     entries = [
         RemoteEntry(
             path="/Camera Uploads/IMG_0002.jpg",
@@ -165,7 +167,7 @@ def test_job_a_dry_run_never_uploads(tmp_path, manifest):
 
 
 def test_job_a_keeper_excluded_and_untouched(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False)
+    config = make_config(tmp_path, dry_run_upload=False)
     entries = [
         RemoteEntry(
             path="/Camera Uploads/keepers/wedding.mp4",
@@ -185,7 +187,7 @@ def test_job_a_keeper_excluded_and_untouched(tmp_path, manifest):
 
 
 def test_job_a_failure_never_deletes_original(tmp_path, manifest, monkeypatch):
-    config = make_config(tmp_path, dry_run=False)
+    config = make_config(tmp_path, dry_run_upload=False)
     entries = [
         RemoteEntry(
             path="/Camera Uploads/IMG_0003.jpg",
@@ -211,7 +213,7 @@ def test_job_a_failure_never_deletes_original(tmp_path, manifest, monkeypatch):
 
 
 def test_job_a_respects_pause_flag(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False)
+    config = make_config(tmp_path, dry_run_upload=False)
     manifest.set_paused(True)
     mega = FakeMegaClient([])
 
@@ -222,7 +224,7 @@ def test_job_a_respects_pause_flag(tmp_path, manifest):
 
 
 def test_job_a_rerun_is_idempotent_no_duplicate_processing(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False)
+    config = make_config(tmp_path, dry_run_upload=False)
     entries = [
         RemoteEntry(
             path="/Camera Uploads/IMG_0004.jpg",
@@ -261,7 +263,7 @@ def test_job_a_discovers_all_but_processes_only_max_batch_size(tmp_path, manifes
     """Discovery must always see the full remote listing — the manifest
     can't be a partial view of reality — even when processing is capped.
     """
-    config = make_config(tmp_path, dry_run=False, max_batch_size=3)
+    config = make_config(tmp_path, dry_run_upload=False, max_batch_size=3)
     mega = FakeMegaClient(_make_entries(10))
 
     run_job_a(manifest, mega, config)
@@ -285,7 +287,7 @@ def test_job_a_batches_process_oldest_first_and_catch_up_over_runs(tmp_path, man
     and eventually process everything — this is the "catch up to the
     present over several daily runs" behavior.
     """
-    config = make_config(tmp_path, dry_run=False, max_batch_size=4)
+    config = make_config(tmp_path, dry_run_upload=False, max_batch_size=4)
     mega = FakeMegaClient(_make_entries(10))
 
     run_job_a(manifest, mega, config)
@@ -305,7 +307,7 @@ def test_job_a_batches_process_oldest_first_and_catch_up_over_runs(tmp_path, man
 
 
 def test_job_a_batch_size_larger_than_pending_processes_everything(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False, max_batch_size=100)
+    config = make_config(tmp_path, dry_run_upload=False, max_batch_size=100)
     mega = FakeMegaClient(_make_entries(5))
 
     run_job_a(manifest, mega, config)
@@ -334,7 +336,7 @@ def _verified_record(manifest, path, captured_at):
 
 
 def test_job_b_moves_only_verified_past_retention_to_trash(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False, retention_days=30)
+    config = make_config(tmp_path, dry_run_delete=False, retention_days=30)
     old_iso = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     new_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
@@ -350,7 +352,7 @@ def test_job_b_moves_only_verified_past_retention_to_trash(tmp_path, manifest):
 
 
 def test_job_b_dry_run_never_moves_anything(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=True, retention_days=30)
+    config = make_config(tmp_path, dry_run_delete=True, retention_days=30)
     old_iso = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     _verified_record(manifest, "/Camera Uploads/old.jpg", old_iso)
 
@@ -364,7 +366,7 @@ def test_job_b_dry_run_never_moves_anything(tmp_path, manifest):
 
 
 def test_job_b_respects_pause_flag(tmp_path, manifest):
-    config = make_config(tmp_path, dry_run=False)
+    config = make_config(tmp_path, dry_run_delete=False)
     manifest.set_paused(True)
     mega = FakeMegaClient([])
 
@@ -379,7 +381,7 @@ def test_job_b_never_touches_non_verified_even_if_old(tmp_path, manifest):
     selected by Job B — this is the manifest's structural guarantee
     (get_deletable), exercised here through the actual job entrypoint.
     """
-    config = make_config(tmp_path, dry_run=False, retention_days=30)
+    config = make_config(tmp_path, dry_run_delete=False, retention_days=30)
     old_iso = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
     manifest.upsert_discovered(
         original_path="/Camera Uploads/stuck.jpg",

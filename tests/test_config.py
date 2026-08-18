@@ -19,7 +19,8 @@ def test_loads_with_defaults():
     assert cfg.retention_run_day == 30
     assert cfg.retention_key == "discovered_at"  # A3: Mega timestamp is upload time, not EXIF
     assert cfg.video_crf == 30
-    assert cfg.dry_run is True
+    assert cfg.dry_run_upload is True
+    assert cfg.dry_run_delete is True
     assert cfg.max_batch_size == 100
 
 
@@ -60,17 +61,40 @@ def test_retention_run_day_out_of_range_raises():
         load_config(env)
 
 
-def test_dry_run_parses_various_truthy_values():
+def test_dry_run_upload_parses_various_truthy_values():
     for val in ("true", "True", "1", "yes", "on"):
-        assert load_config(dict(BASE_ENV, DRY_RUN=val)).dry_run is True
+        assert load_config(dict(BASE_ENV, DRY_RUN_UPLOAD=val)).dry_run_upload is True
     for val in ("false", "0", "no", "off"):
-        assert load_config(dict(BASE_ENV, DRY_RUN=val)).dry_run is False
+        assert load_config(dict(BASE_ENV, DRY_RUN_UPLOAD=val)).dry_run_upload is False
 
 
-def test_dry_run_defaults_true_when_unset():
+def test_dry_run_delete_parses_various_truthy_values():
+    for val in ("true", "True", "1", "yes", "on"):
+        assert load_config(dict(BASE_ENV, DRY_RUN_DELETE=val)).dry_run_delete is True
+    for val in ("false", "0", "no", "off"):
+        assert load_config(dict(BASE_ENV, DRY_RUN_DELETE=val)).dry_run_delete is False
+
+
+def test_dry_run_flags_default_true_when_unset():
     env = dict(BASE_ENV)
-    env.pop("DRY_RUN", None)
-    assert load_config(env).dry_run is True
+    env.pop("DRY_RUN_UPLOAD", None)
+    env.pop("DRY_RUN_DELETE", None)
+    cfg = load_config(env)
+    assert cfg.dry_run_upload is True
+    assert cfg.dry_run_delete is True
+
+
+def test_dry_run_flags_are_independent():
+    """The whole point of splitting them: upload can go live while delete
+    stays blocked, and vice versa.
+    """
+    cfg = load_config(dict(BASE_ENV, DRY_RUN_UPLOAD="false", DRY_RUN_DELETE="true"))
+    assert cfg.dry_run_upload is False
+    assert cfg.dry_run_delete is True
+
+    cfg = load_config(dict(BASE_ENV, DRY_RUN_UPLOAD="true", DRY_RUN_DELETE="false"))
+    assert cfg.dry_run_upload is True
+    assert cfg.dry_run_delete is False
 
 
 def test_max_batch_size_custom_value():

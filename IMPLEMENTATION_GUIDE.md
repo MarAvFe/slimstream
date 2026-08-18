@@ -132,11 +132,13 @@ slimstream/
 3. Config via env vars with validation **at startup, not at use** — a bad `RETENTION_DAYS` must fail before any file is touched, not midway through a delete loop.
 
 ### Config surface (all defaults from spec 1.9 / 1.8)
-`MEGA_CAMERA_PATH`, `MEGA_KEEPERS_PATH`, `MEGA_TRASH_PATH`, `RETENTION_DAYS=30`, `RETENTION_RUN_DAY=30`, `RETENTION_KEY=discovered_at`, `VIDEO_HEIGHT=480`, `VIDEO_CRF=30`, `IMAGE_LONG_EDGE=1200`, `IMAGE_QUALITY=60`, `SCRATCH_DIR`, `MANIFEST_DB_PATH`, `DRY_RUN=true`, `SETTLING_MINUTES`, `MAX_BATCH_SIZE=100`.
+`MEGA_CAMERA_PATH`, `MEGA_KEEPERS_PATH`, `MEGA_TRASH_PATH`, `RETENTION_DAYS=30`, `RETENTION_RUN_DAY=30`, `RETENTION_KEY=discovered_at`, `VIDEO_HEIGHT=480`, `VIDEO_CRF=30`, `IMAGE_LONG_EDGE=1200`, `IMAGE_QUALITY=60`, `SCRATCH_DIR`, `MANIFEST_DB_PATH`, `LOG_DIR`, `DRY_RUN_UPLOAD=true`, `DRY_RUN_DELETE=true`, `SETTLING_MINUTES`, `MAX_BATCH_SIZE=100`.
 
 `VIDEO_CRF` is ffmpeg's libx264 Constant Rate Factor (spec 1.9) — the quality/size dial, roughly logarithmic, lower = larger/better, ~18 "visually lossless," ~23 the libx264 default. Tuned by visual comparison against real footage (2026-08-18, `scripts/tune_transcode.py`): CRF 30 confirmed as an acceptable tradeoff — CRF 23 looked better but saved far less space, working against the project's actual goal. `IMAGE_LONG_EDGE` similarly tuned down from spec 1.9's original 1600 to 1200.
 
-**`DRY_RUN` defaults to `true`.** Turning it off is a deliberate human act (spec 1.10).
+**`DRY_RUN_UPLOAD` and `DRY_RUN_DELETE` are two independent flags, not one — this replaces the original single `DRY_RUN`.** Uploading a compressed copy is fully reversible (it's just an extra file sitting in Mega you can inspect before trusting it), but deleting an original is the one irreversible action in the whole pipeline (spec 1.6's invariant). Both default `true`. The intended rollout: flip `DRY_RUN_UPLOAD=false` first and let Job A upload for real so you can eyeball actual compressed output in Mega on your own devices, keeping `DRY_RUN_DELETE=true` the whole time — only flip that once Job A's output is trusted.
+
+**Logging is split into two files under `LOG_DIR`** (defaults to `<MANIFEST_DB_PATH's dir>/logs` if unset): `slimstream.log` is the full verbose per-file log (`tail -f` while a run is in progress), `runs.log` is one appended line per invocation — timestamp, mode, batch size, and outcome counts — for a fast human-readable history without wading through the verbose log. Any unhandled crash is caught in `cli.py` and still lands in both files (as `CRASHED: <message>` in `runs.log`, full traceback in `slimstream.log`) rather than only reaching `journalctl` — a silent-to-the-logs crash defeats the point of having them.
 
 **`MAX_BATCH_SIZE` caps how many files Job A *processes* (downloads/transcodes/uploads) per run — never how many it *discovers*.** Discovery always lists the full remote folder and inserts every unseen file into the manifest, so the manifest stays a complete picture of reality on every run; only the processing step is throttled. `get_pending()` orders oldest `discovered_at` first, so a capped run works through backlog oldest-first, and repeated daily runs gradually catch up to the present — this is the intended way to onboard a library with thousands of existing files without one run trying to process all of them. Set it low (e.g. `MAX_BATCH_SIZE=20`) for a first real run to keep the blast radius small and the run fast to review; raise it toward the steady-state default (100) once Job A is trusted.
 
@@ -179,7 +181,7 @@ Wraps spec 1.9 commands. Per-format branch driven by A4.
 
 ---
 
-## Phase 4 — Job A (compress) — still `DRY_RUN`
+## Phase 4 — Job A (compress) — still `DRY_RUN_UPLOAD`
 
 Implements spec 1.7. Job A **never deletes an original.**
 
@@ -190,7 +192,7 @@ Order per file: download → hash (D1 dedup check) → transcode → verify outp
 - Idempotent: a crash mid-run leaves a resumable state; the next run continues.
 - Backoff on `retry_count`; a row exceeding max retries is parked for human review, not retried forever.
 
-**Human gate:** run against a small real folder with `DRY_RUN=true`, then live-but-Job-A-only. **Eyeball the transcoded output.** 480p/CRF 30 is a starting guess, not a validated setting — this is where you tune it, while originals are still safe.
+**Human gate:** run against a small real folder with `DRY_RUN_UPLOAD=true` first, then flip to `false` (still `DRY_RUN_DELETE=true`) so Job A uploads for real. **Eyeball the transcoded output** — since upload is now live but delete is not, this can be done directly against real compressed copies sitting in Mega, viewable from any device, without any risk to originals. 480p/CRF 30 confirmed by this exact process on 2026-08-18 (`scripts/tune_transcode.py`) as a reasonable default — see Phase 0 appendix.
 
 ---
 
@@ -208,7 +210,7 @@ Query, run once per invocation: `state == verified AND <retention_key> < now - R
 - Log every delete with enough detail to reverse it by hand.
 
 **Rollout, in order, no skipping:**
-1. `DRY_RUN=true` — read the intended-delete log in full.
+1. `DRY_RUN_DELETE=true` — read the intended-delete log in full.
 2. Live on a handful of files whose originals you would not miss.
 3. Confirm they are recoverable from trash. *Actually restore one.*
 4. Only then schedule it.
