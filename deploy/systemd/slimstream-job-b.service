@@ -1,0 +1,15 @@
+[Unit]
+Description=slimstream Job B (monthly retention delete)
+After=network-online.target slimstream-job-a.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=slimstream
+WorkingDirectory=/home/slimstream/slimstream/app
+EnvironmentFile=/home/slimstream/slimstream/app/.env
+# job-b itself no-ops on non-run-days (config.RETENTION_RUN_DAY, clamped
+# for short months in code — see D4b) — the daily trigger below is
+# intentional, correctness lives in should_run_job_b_today(), not in the
+# calendar expression.
+ExecStart=/home/slimstream/slimstream/app/.venv/bin/slimstream job-b

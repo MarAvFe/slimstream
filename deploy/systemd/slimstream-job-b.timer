@@ -1,0 +1,16 @@
+[Unit]
+Description=Trigger slimstream Job B daily; job itself runs only on RETENTION_RUN_DAY
+
+[Timer]
+# Fires daily, after Job A. The job entrypoint (should_run_job_b_today in
+# worker.py) checks RETENTION_RUN_DAY and no-ops on every day but one.
+# Deliberately not encoding "day 30" directly in OnCalendar: systemd
+# calendar expressions don't clamp to the last day of short months (no Feb
+# 30), so a literal `*-*-30` would silently skip February and any month
+# lacking that day. The clamp lives in code (D4b) instead, where it's
+# testable and unambiguous.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

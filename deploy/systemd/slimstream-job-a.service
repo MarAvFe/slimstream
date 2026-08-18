@@ -1,0 +1,11 @@
+[Unit]
+Description=slimstream Job A (discover + compress new arrivals)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=slimstream
+WorkingDirectory=/home/slimstream/slimstream/app
+EnvironmentFile=/home/slimstream/slimstream/app/.env
+ExecStart=/home/slimstream/slimstream/app/.venv/bin/slimstream job-a
