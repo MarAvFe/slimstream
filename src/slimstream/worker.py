@@ -201,19 +201,46 @@ def _process_one(
 
 
 def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> None:
+    """Discovery always runs to completion — the manifest must reflect
+    the full remote listing on every run, never a partial view. Only the
+    processing step (download/transcode/upload) is capped per invocation
+    via MAX_BATCH_SIZE, so a library with thousands of backlogged files
+    can be worked through gradually across daily runs instead of one run
+    attempting everything at once.
+
+    get_pending() orders oldest discovered_at first, so batching naturally
+    processes the oldest backlog first and catches up towards the present
+    over successive runs.
+    """
     _check_not_paused(manifest)
 
     run_discovery(manifest, mega, config)
 
-    for record in manifest.get_pending():
+    pending = manifest.get_pending()
+    processed = 0
+    skipped_for_retries = 0
+
+    for record in pending:
+        if processed >= config.max_batch_size:
+            break
         if record.retry_count >= MAX_RETRIES:
             logger.warning(
                 "parking %s after %d failed retries for human review",
                 record.file_id,
                 record.retry_count,
             )
+            skipped_for_retries += 1
             continue
         _process_one(record, manifest, mega, config)
+        processed += 1
+
+    remaining = len(pending) - processed - skipped_for_retries
+    logger.info(
+        "job A: processed %d, parked %d (max retries), %d still pending for next run",
+        processed,
+        skipped_for_retries,
+        max(remaining, 0),
+    )
 
 
 # --- Job B: retention delete -----------------------------------------------

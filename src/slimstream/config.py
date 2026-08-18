@@ -39,6 +39,7 @@ class Config:
 
     settling_minutes: int
     dry_run: bool
+    max_batch_size: int
 
     @property
     def manifest_export_path(self) -> str:
@@ -130,6 +131,10 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
     dry_run = _parse_bool(env, "DRY_RUN", default=True)
 
+    max_batch_size = _parse_int(env, "MAX_BATCH_SIZE", default=100)
+    if max_batch_size <= 0:
+        raise ConfigError(f"MAX_BATCH_SIZE must be positive, got {max_batch_size}")
+
     return Config(
         mega_camera_path=mega_camera_path,
         mega_keepers_path=mega_keepers_path,
@@ -145,4 +150,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         manifest_db_path=manifest_db_path,
         settling_minutes=settling_minutes,
         dry_run=dry_run,
+        max_batch_size=max_batch_size,
     )

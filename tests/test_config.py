@@ -20,6 +20,7 @@ def test_loads_with_defaults():
     assert cfg.retention_key == "discovered_at"  # A3: Mega timestamp is upload time, not EXIF
     assert cfg.video_crf == 30
     assert cfg.dry_run is True
+    assert cfg.max_batch_size == 100
 
 
 def test_missing_required_var_raises():
@@ -70,3 +71,20 @@ def test_dry_run_defaults_true_when_unset():
     env = dict(BASE_ENV)
     env.pop("DRY_RUN", None)
     assert load_config(env).dry_run is True
+
+
+def test_max_batch_size_custom_value():
+    env = dict(BASE_ENV, MAX_BATCH_SIZE="20")
+    assert load_config(env).max_batch_size == 20
+
+
+def test_max_batch_size_zero_raises():
+    env = dict(BASE_ENV, MAX_BATCH_SIZE="0")
+    with pytest.raises(ConfigError):
+        load_config(env)
+
+
+def test_max_batch_size_negative_raises():
+    env = dict(BASE_ENV, MAX_BATCH_SIZE="-10")
+    with pytest.raises(ConfigError):
+        load_config(env)

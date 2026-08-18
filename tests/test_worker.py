@@ -41,6 +41,7 @@ def make_config(tmp_path, **overrides) -> Config:
         manifest_db_path=tmp_path / "manifest.db",
         settling_minutes=15,
         dry_run=True,
+        max_batch_size=100,
     )
     defaults.update(overrides)
     return Config(**defaults)
@@ -62,7 +63,12 @@ class FakeMegaClient:
     def download(self, remote_path: str, local_dir: Path) -> Path:
         local_dir.mkdir(parents=True, exist_ok=True)
         local_path = local_dir / remote_path.rsplit("/", 1)[-1]
-        local_path.write_bytes(self._local_bytes)
+        # Content must differ per remote path, or content_sha256 dedup
+        # (worker._process_one) legitimately short-circuits every file
+        # after the first as a duplicate of identical bytes — that's
+        # correct pipeline behavior, but it silently breaks any test with
+        # multiple distinct files sharing one FakeMegaClient.
+        local_path.write_bytes(self._local_bytes + remote_path.encode())
         return local_path
 
     def upload(self, local_path: Path, remote_dir: str) -> str:
@@ -234,6 +240,78 @@ def test_job_a_rerun_is_idempotent_no_duplicate_processing(tmp_path, manifest):
     assert len(mega.uploaded) == 1  # not re-uploaded
     count = manifest._conn.execute("SELECT COUNT(*) c FROM files").fetchone()["c"]
     assert count == 1
+
+
+def _make_entries(n: int, prefix: str = "IMG") -> list[RemoteEntry]:
+    return [
+        RemoteEntry(
+            path=f"/Camera Uploads/{prefix}_{i:04d}.jpg",
+            size=1024,
+            is_dir=False,
+            node_handle=f"H:{i:08d}",
+            # oldest first, so get_pending()'s discovered_at ASC ordering
+            # is meaningfully exercised by the batch-size tests below
+            mtime_iso=f"2026-01-{(i % 28) + 1:02d}T00:00:00Z",
+        )
+        for i in range(n)
+    ]
+
+
+def test_job_a_discovers_all_but_processes_only_max_batch_size(tmp_path, manifest):
+    """Discovery must always see the full remote listing — the manifest
+    can't be a partial view of reality — even when processing is capped.
+    """
+    config = make_config(tmp_path, dry_run=False, max_batch_size=3)
+    mega = FakeMegaClient(_make_entries(10))
+
+    run_job_a(manifest, mega, config)
+
+    total_discovered = manifest._conn.execute("SELECT COUNT(*) c FROM files").fetchone()["c"]
+    assert total_discovered == 10  # discovery is never capped
+
+    assert len(mega.uploaded) == 3  # only max_batch_size were processed
+
+    verified = manifest._conn.execute(
+        "SELECT COUNT(*) c FROM files WHERE state = 'verified'"
+    ).fetchone()["c"]
+    assert verified == 3
+
+    still_pending = manifest.get_pending()
+    assert len(still_pending) == 7
+
+
+def test_job_a_batches_process_oldest_first_and_catch_up_over_runs(tmp_path, manifest):
+    """Successive capped runs should work through the backlog oldest-first
+    and eventually process everything — this is the "catch up to the
+    present over several daily runs" behavior.
+    """
+    config = make_config(tmp_path, dry_run=False, max_batch_size=4)
+    mega = FakeMegaClient(_make_entries(10))
+
+    run_job_a(manifest, mega, config)
+    assert len(mega.uploaded) == 4
+
+    run_job_a(manifest, mega, config)  # second run, same remote listing
+    assert len(mega.uploaded) == 8
+
+    run_job_a(manifest, mega, config)  # third run finishes the backlog
+    assert len(mega.uploaded) == 10
+
+    assert manifest.get_pending() == []
+
+    # nothing was double-processed
+    uploaded_names = [Path(local).name for local, _ in mega.uploaded]
+    assert len(uploaded_names) == len(set(uploaded_names))
+
+
+def test_job_a_batch_size_larger_than_pending_processes_everything(tmp_path, manifest):
+    config = make_config(tmp_path, dry_run=False, max_batch_size=100)
+    mega = FakeMegaClient(_make_entries(5))
+
+    run_job_a(manifest, mega, config)
+
+    assert len(mega.uploaded) == 5
+    assert manifest.get_pending() == []
 
 
 # --- Job B -------------------------------------------------------------
