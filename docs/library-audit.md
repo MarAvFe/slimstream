@@ -43,9 +43,16 @@ Wall-clock from the first real `job-a` runs against the live library,
 |---|---|---|---|
 | 1 | 20 | 17:57:01 → 17:58:03 = **62 s** | 3.10 s |
 | 2 | 200 | 19:02:27 → 19:13:52 = **11 m 25 s** | 3.42 s |
+| 3 | 200 | 19:58:42 → 20:07:35 = **8 m 53 s** | 2.66 s |
 
 Per-file timing from the manifest (gaps between consecutive
 `verified_at`, 218 samples): **avg 3.37 s, min 1.68 s, max 7.86 s**.
+
+Runs 2 and 3 were the same batch size but differed by 2.5 minutes
+(3.42 vs 2.66 s/file, a 29 % spread) purely on file mix — same machine,
+same settings, consecutive slices of the same library. Treat any single
+run as an estimate with roughly ±30 % of spread, and size batches off the
+slower figure rather than the faster one.
 
 Timings include discovery, which re-lists and re-checks all ~22k rows on
 every run. That is a fixed overhead of roughly 1–2 s per run, so it is
