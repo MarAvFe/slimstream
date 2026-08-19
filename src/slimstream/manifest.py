@@ -19,6 +19,7 @@ content hash, known only after download, used for dedup.
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -456,3 +457,97 @@ class Manifest:
                 "SELECT * FROM files WHERE file_id = ?", (file_id,)
             ).fetchone()
             return ManifestRecord.from_row(row)
+
+
+# --- backup / restore (D2) ------------------------------------------------
+#
+# The manifest is the only record of what has been processed, what failed,
+# and — once Job B runs — what was moved to trash. It lives on one VM's
+# disk, so losing that VM loses all of it. D5's mirrored-path check makes
+# loss *survivable* (rediscovery re-stats and short-circuits), but that is
+# a slow rebuild that still discards retry history and the delete audit
+# trail permanently.
+#
+# Export is JSON rather than a copy of the .db so it stays readable and
+# restorable across schema changes, and import exists because an export
+# nobody can restore from is not a backup.
+
+EXPORT_FORMAT_VERSION = 1
+
+
+def export_manifest(manifest: "Manifest", out_path: Path) -> int:
+    """Dump the whole manifest to JSON. Returns the record count."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    files = [
+        dict(row)
+        for row in manifest._conn.execute("SELECT * FROM files ORDER BY discovered_at")
+    ]
+    meta = {
+        row["key"]: row["value"]
+        for row in manifest._conn.execute("SELECT key, value FROM meta")
+    }
+
+    payload = {
+        "export_format_version": EXPORT_FORMAT_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "exported_at": _utcnow_iso(),
+        "record_count": len(files),
+        "meta": meta,
+        "files": files,
+    }
+
+    # Write to a temp file and rename, so an interrupted export can never
+    # leave a truncated file where a valid backup used to be.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".partial")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    tmp_path.replace(out_path)
+
+    return len(files)
+
+
+def import_manifest(manifest: "Manifest", in_path: Path, *, force: bool = False) -> int:
+    """Restore a manifest from a JSON export. Returns the record count.
+
+    Refuses to touch a manifest that already holds records unless `force`
+    is set: silently merging a backup into live state could resurrect
+    records for files already moved to trash, or overwrite newer state
+    with older.
+    """
+    with open(in_path, encoding="utf-8") as f:
+        payload = json.load(f)
+
+    version = payload.get("export_format_version")
+    if version != EXPORT_FORMAT_VERSION:
+        raise ValueError(
+            f"unsupported export_format_version {version!r} "
+            f"(this build reads {EXPORT_FORMAT_VERSION})"
+        )
+
+    existing = manifest._conn.execute("SELECT COUNT(*) c FROM files").fetchone()["c"]
+    if existing and not force:
+        raise ValueError(
+            f"refusing to import into a manifest that already holds {existing} "
+            f"records; pass force=True to replace them"
+        )
+
+    files = payload["files"]
+    with manifest._transaction() as conn:
+        if existing:
+            conn.execute("DELETE FROM files")
+        for row in files:
+            columns = ", ".join(row.keys())
+            placeholders = ", ".join("?" for _ in row)
+            conn.execute(
+                f"INSERT INTO files ({columns}) VALUES ({placeholders})",  # noqa: S608
+                list(row.values()),
+            )
+        for key, value in payload.get("meta", {}).items():
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    return len(files)

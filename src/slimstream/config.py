@@ -25,6 +25,7 @@ class Config:
     mega_keepers_path: str
     mega_trash_path: str
     mega_compressed_root: str
+    mega_manifest_export_path: str
 
     retention_days: int
     retention_run_day: int
@@ -40,14 +41,22 @@ class Config:
     log_dir: Path
 
     settling_minutes: int
+    manifest_export_enabled: bool
     dry_run_upload: bool
     dry_run_delete: bool
     max_batch_size: int
 
     @property
     def manifest_export_path(self) -> str:
-        """Remote Mega path for the nightly manifest export (D2)."""
-        return f"{self.mega_trash_path.rsplit('/', 1)[0]}/slimstream-manifest-export.json"
+        """Remote Mega path for the manifest export (D2).
+
+        Explicitly configured rather than derived. An earlier version
+        computed this from `mega_trash_path`, which for a trash folder
+        nested under the camera path resolved to a file *inside the tree
+        discovery scans* — the backup would have been listed as a
+        candidate media file on every run.
+        """
+        return self.mega_manifest_export_path
 
     def compressed_path_for(self, original_path: str) -> str:
         """Mirror an original's path under mega_compressed_root, preserving
@@ -171,6 +180,14 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     dry_run_upload = _parse_bool(env, "DRY_RUN_UPLOAD", default=True)
     dry_run_delete = _parse_bool(env, "DRY_RUN_DELETE", default=True)
 
+    # Keep the export OUT of MEGA_CAMERA_PATH by default, or discovery
+    # lists the backup as a candidate media file on every run.
+    mega_manifest_export_path = (
+        env.get("MEGA_MANIFEST_EXPORT_PATH", "").strip()
+        or "/slimstream/manifest-export.json"
+    )
+    manifest_export_enabled = _parse_bool(env, "MANIFEST_EXPORT_ENABLED", default=True)
+
     max_batch_size = _parse_int(env, "MAX_BATCH_SIZE", default=100)
     if max_batch_size <= 0:
         raise ConfigError(f"MAX_BATCH_SIZE must be positive, got {max_batch_size}")
@@ -180,6 +197,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         mega_keepers_path=mega_keepers_path,
         mega_trash_path=mega_trash_path,
         mega_compressed_root=mega_compressed_root,
+        mega_manifest_export_path=mega_manifest_export_path,
         retention_days=retention_days,
         retention_run_day=retention_run_day,
         retention_key=retention_key,
@@ -191,6 +209,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         manifest_db_path=manifest_db_path,
         log_dir=log_dir,
         settling_minutes=settling_minutes,
+        manifest_export_enabled=manifest_export_enabled,
         dry_run_upload=dry_run_upload,
         dry_run_delete=dry_run_delete,
         max_batch_size=max_batch_size,

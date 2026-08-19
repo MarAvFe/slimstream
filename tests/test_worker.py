@@ -32,6 +32,7 @@ def make_config(tmp_path, **overrides) -> Config:
         mega_keepers_path="/Camera Uploads/keepers",
         mega_trash_path="/slimstream-trash",
         mega_compressed_root="/Camera Uploads Compressed",
+        mega_manifest_export_path="/slimstream/manifest-export.json",
         retention_days=30,
         retention_run_day=30,
         retention_key="captured_at",
@@ -43,6 +44,7 @@ def make_config(tmp_path, **overrides) -> Config:
         manifest_db_path=tmp_path / "manifest.db",
         log_dir=tmp_path / "logs",
         settling_minutes=15,
+        manifest_export_enabled=False,  # cli-level concern; not exercised by worker tests
         dry_run_upload=True,
         dry_run_delete=True,
         max_batch_size=100,
@@ -326,6 +328,7 @@ def test_job_a_recovers_from_manifest_loss_via_mirrored_path(tmp_path, manifest)
         tmp_path,
         dry_run_upload=False,
         mega_compressed_root="/Camera Uploads Compressed",
+        mega_manifest_export_path="/slimstream/manifest-export.json",
     )
     entries = [
         RemoteEntry(

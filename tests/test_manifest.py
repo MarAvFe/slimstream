@@ -217,3 +217,88 @@ def test_pause_flag_roundtrip(manifest):
     assert manifest.is_paused() is True
     manifest.set_paused(False)
     assert manifest.is_paused() is False
+
+
+# --- backup / restore (D2) ------------------------------------------------
+
+
+def _populate(manifest, n=3):
+    ids = []
+    for i in range(n):
+        rec = manifest.upsert_discovered(
+            original_path=f"/Camera Uploads/IMG_{i:04d}.jpg",
+            original_size=1000 + i,
+            captured_at=f"2026-01-{i + 1:02d}",
+            media_type="photo",
+            node_handle=f"H:{i:08d}",
+            is_keeper=False,
+        )
+        ids.append(rec.file_id)
+    return ids
+
+
+def test_export_then_import_roundtrips_every_field(tmp_path, manifest):
+    from slimstream.manifest import export_manifest, import_manifest
+
+    ids = _populate(manifest, 3)
+    # advance one record so non-default columns are exercised too
+    manifest.transition(ids[0], STATE_COMPRESSING)
+    manifest.transition(ids[0], STATE_COMPRESSED, compressed_path="/x/a.jpg", compressed_size=42)
+    manifest.set_meta("megacmd_version", "2.5.2.1")
+
+    out = tmp_path / "export.json"
+    assert export_manifest(manifest, out) == 3
+
+    restored = Manifest(tmp_path / "restored.db")
+    try:
+        assert import_manifest(restored, out) == 3
+        for file_id in ids:
+            assert restored.get(file_id) == manifest.get(file_id)
+        assert restored.get_meta("megacmd_version") == "2.5.2.1"
+    finally:
+        restored.close()
+
+
+def test_import_refuses_to_clobber_a_populated_manifest(tmp_path, manifest):
+    from slimstream.manifest import export_manifest, import_manifest
+
+    _populate(manifest, 2)
+    out = tmp_path / "export.json"
+    export_manifest(manifest, out)
+
+    other = Manifest(tmp_path / "other.db")
+    try:
+        _populate(other, 1)
+        # Silently merging could resurrect records for files already moved
+        # to trash, or overwrite newer state with older.
+        with pytest.raises(ValueError, match="already holds"):
+            import_manifest(other, out)
+        assert import_manifest(other, out, force=True) == 2
+    finally:
+        other.close()
+
+
+def test_import_rejects_unknown_export_format_version(tmp_path, manifest):
+    import json
+
+    from slimstream.manifest import import_manifest
+
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"export_format_version": 999, "files": [], "meta": {}}))
+
+    with pytest.raises(ValueError, match="unsupported export_format_version"):
+        import_manifest(manifest, bad)
+
+
+def test_export_is_atomic_leaving_no_partial_file(tmp_path, manifest):
+    """An interrupted export must not replace a good backup with a
+    truncated one, so the write goes to a temp file and is renamed.
+    """
+    from slimstream.manifest import export_manifest
+
+    _populate(manifest, 2)
+    out = tmp_path / "export.json"
+    export_manifest(manifest, out)
+
+    assert out.exists()
+    assert not list(tmp_path.glob("*.partial"))

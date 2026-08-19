@@ -24,7 +24,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from slimstream.config import Config, ConfigError, load_config
-from slimstream.manifest import Manifest
+from slimstream.manifest import Manifest, export_manifest, import_manifest
 from slimstream.mega_client import MegaClient
 from slimstream.worker import (
     JobAResult,
@@ -112,6 +112,32 @@ def _load_env_file(explicit_path: str | None) -> None:
         load_dotenv(default_path, override=False)
 
 
+def _default_export_path(config: Config) -> Path:
+    return config.manifest_db_path.parent / "manifest-export.json"
+
+
+def _upload_export(config: Config, mega: MegaClient, local: Path, logger) -> None:
+    remote_dir = config.manifest_export_path.rsplit("/", 1)[0] or "/"
+    mega.mkdir_p(remote_dir)
+    mega.upload(local, remote_dir)
+    logger.info("uploaded manifest export to %s", config.manifest_export_path)
+
+
+def _export(config: Config, manifest: Manifest, mega: MegaClient, logger) -> None:
+    """Back up after a run. A backup failure must not fail the run itself,
+    but it must be loud — a silently-missing backup is worse than none,
+    because it is trusted.
+    """
+    try:
+        out = _default_export_path(config)
+        count = export_manifest(manifest, out)
+        _upload_export(config, mega, out, logger)
+        logger.info("manifest backup: %d records", count)
+    except Exception:  # noqa: BLE001
+        logger.exception("MANIFEST BACKUP FAILED — run itself was fine, backup is stale")
+        _append_run_summary(config, "  !! manifest backup FAILED (see slimstream.log)")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="slimstream")
     parser.add_argument(
@@ -122,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     job_a = sub.add_parser("job-a", help="discover + compress new arrivals")
+    exp = sub.add_parser("export-manifest", help="back up the manifest to Mega")
+    exp.add_argument("--output", default=None, help="local JSON path (default: alongside the db)")
+    exp.add_argument("--no-upload", action="store_true", help="write locally, skip the Mega upload")
+    imp = sub.add_parser("import-manifest", help="restore the manifest from a JSON export")
+    imp.add_argument("input", help="path to a JSON export")
+    imp.add_argument(
+        "--force", action="store_true",
+        help="replace existing records (refuses to touch a non-empty manifest otherwise)",
+    )
     job_b = sub.add_parser("job-b", help="rolling retention delete")
     job_b.add_argument(
         "--force",
@@ -164,6 +199,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "job-a":
             result = run_job_a(manifest, mega, config)
             _append_run_summary(config, _job_a_summary_line(config, result))
+            if config.manifest_export_enabled:
+                _export(config, manifest, mega, logger)
+        elif args.command == "export-manifest":
+            out = Path(args.output) if args.output else _default_export_path(config)
+            count = export_manifest(manifest, out)
+            logger.info("exported %d records to %s", count, out)
+            if not args.no_upload:
+                _upload_export(config, mega, out, logger)
+            _append_run_summary(config, f"export-manifest  records={count} -> {out}")
+        elif args.command == "import-manifest":
+            count = import_manifest(manifest, Path(args.input), force=args.force)
+            logger.info("imported %d records from %s", count, args.input)
+            _append_run_summary(config, f"import-manifest  records={count} <- {args.input}")
         elif args.command == "job-b":
             if not args.force and not should_run_job_b_today(config):
                 msg = (
