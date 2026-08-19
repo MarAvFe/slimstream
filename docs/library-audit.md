@@ -44,62 +44,69 @@ Wall-clock from the first real `job-a` runs against the live library,
 | 1 | 20 | 17:57:01 → 17:58:03 = **62 s** | 3.10 s |
 | 2 | 200 | 19:02:27 → 19:13:52 = **11 m 25 s** | 3.42 s |
 | 3 | 200 | 19:58:42 → 20:07:35 = **8 m 53 s** | 2.66 s |
+| 4 | 500 | 20:49:18 → 21:19:11 = **29 m 53 s** | 3.59 s |
 
-Per-file timing from the manifest (gaps between consecutive
-`verified_at`, 218 samples): **avg 3.37 s, min 1.68 s, max 7.86 s**.
+Whole-run averages hide the only variable that matters, which is media
+type. Measuring gaps between consecutive `verified_at` **within** a run
+(inter-run idle gaps excluded — an early version of this measurement let
+a 45-minute gap between runs through and reported it as a 2,695 s
+"photo"):
 
-Runs 2 and 3 were the same batch size but differed by 2.5 minutes
-(3.42 vs 2.66 s/file, a 29 % spread) purely on file mix — same machine,
-same settings, consecutive slices of the same library. Treat any single
-run as an estimate with roughly ±30 % of spread, and size batches off the
-slower figure rather than the faster one.
+| media | samples | avg | min | max | avg size |
+|---|---|---|---|---|---|
+| photo | 899 | **2.89 s** | 1.48 s | 9.38 s | 2.0 MB |
+| video | 17 | **26.41 s** | 3.82 s | 194.92 s | 19.8 MB |
 
-Timings include discovery, which re-lists and re-checks all ~22k rows on
-every run. That is a fixed overhead of roughly 1–2 s per run, so it is
-noise at batch 200 and would be pure waste at batch 5.
+Videos are ~9× slower per file. Their cost tracks size almost linearly at
+**≈1.3 s per MB** — the 151 MB clip took 194.9 s (1.29 s/MB), and the
+larger files cluster tightly around 1.1–1.3 s/MB.
 
-### Measured compression, first 220 files
+**Batch size in *files* is therefore a poor proxy for run length.** 500
+photos is half an hour; 500 videos would be closer to 3.7 hours. The
+largest video in the library is 656 MB, which alone projects to ~14
+minutes.
+
+### Measured compression by type
 
 | media | files | original | compressed | ratio |
 |---|---|---|---|---|
-| photo | 220 | 610.0 MB | 21.9 MB | **3.6 %** |
-| video | 0 | — | — | not yet measured |
+| photo | 903 | 1,772.5 MB | 92.0 MB | **5.2 %** |
+| video | 17 | 336.1 MB | 31.2 MB | **9.3 %** |
 
-**Both caveats matter before extrapolating:**
+The photo figure still skews optimistic: these are the oldest files in
+the library and the sample averages 2.0 MB against a library-wide photo
+average of 2.6 MB. The 2026-08-18 tuning sweep measured ~12.7 % on recent
+Pixel photos, so expect the true blended photo ratio to land between the
+two.
 
-1. **No videos have been processed yet.** Files are handled oldest-first,
-   and the oldest ~2,000 are 2014-era photos. Videos are 58 % of the
-   bytes and are far slower per file, so the 3.37 s/file figure is a
-   photo-only measurement and will rise sharply once videos appear.
-2. **3.6 % is not representative of the whole library.** These are old,
-   large-dimension photos being downscaled hard to 1200 px. The
-   2026-08-18 tuning sweep on *recent* Pixel photos measured ~12.7 % at
-   the same settings. Expect the real library-wide photo ratio to land
-   between the two, nearer 12 % for anything modern.
+### Projected total work
 
-### Revised projection
+Using the measured rates against what is left (18,811 photos, 2,407
+videos / 63.0 GB):
 
-Photo-only extrapolation, for the ~19,720 remaining photos at 3.37 s:
-**≈ 18 hours** of compute. Videos are unmeasured; at a plausible
-20–60 s each, 2,424 videos add **13–40 hours**. Total order of magnitude
-is therefore **a day and a half to two and a half days of CPU**, not
-weeks — the calendar time below is dominated by how often you choose to
-run, not by the work itself.
+| | remaining | rate | time |
+|---|---|---|---|
+| photos | 18,811 files | 2.89 s/file | **≈ 15 h** |
+| videos | 63.0 GB | ≈1.25 s/MB | **≈ 22 h** |
+| **total** | | | **≈ 37 h** |
 
-Re-measure once the first video batch completes; that is the number that
-actually decides the schedule.
+So roughly **a day and a half of CPU**, now measured rather than guessed.
+Videos are 60 % of the remaining time despite being 11 % of the files.
 
 ## Projected savings
 
-Using the compression ratios actually measured in the 2026-08-18 tuning
-sweep (`scripts/tune_transcode.py`) at the chosen defaults — 480p/CRF 30
-for video, 1200px/q60 for stills:
+Using the ratios measured on real processed files (5.2 % photo, 9.3 %
+video — see above), rather than the earlier tuning-sweep estimate:
 
-| | |
-|---|---|
-| Current | 117.7 GB |
-| Projected compressed | **~14 GB** |
-| Reclaimed | **~104 GB** |
+| | photos | videos | total |
+|---|---|---|---|
+| Current | 49.7 GB | 68.0 GB | **117.7 GB** |
+| Projected compressed | ~2.6–4 GB | ~6.3 GB | **~9–10 GB** |
+| Reclaimed | | | **~108 GB** |
+
+Slightly better than the original ~104 GB estimate, and now grounded in
+920 actually-processed files instead of a 6-file sample. The photo range
+reflects the old-files skew noted above.
 
 That is the project's premise, confirmed against the real library rather
 than assumed.
@@ -117,15 +124,21 @@ always lists everything). For 22,144 backlogged files at one run per day:
 | 500 | **44** |
 | 1000 | 22 |
 
-**20 is not viable for the initial catch-up.** With measured throughput
-of ~3.4 s/file (photos), the wall clock per run is:
+**20 is not viable for the initial catch-up.** Wall clock per run,
+measured for photos — but note this stops holding once a batch reaches
+the video-heavy stretches (files are processed oldest-first, and videos
+begin at position 855):
 
-| `MAX_BATCH_SIZE` | run duration (photos) |
-|---|---|
-| 200 | ~11 min *(measured)* |
-| 500 | ~28 min |
-| 1000 | ~57 min |
-| 2000 | ~1 h 55 m |
+| `MAX_BATCH_SIZE` | all photos | all videos |
+|---|---|---|
+| 200 | ~10 min *(measured)* | ~1 h 28 m |
+| 500 | ~30 min *(measured)* | ~3 h 40 m |
+| 1000 | ~48 min | ~7 h 20 m |
+| 2000 | ~1 h 36 m | ~14 h 40 m |
+
+Real batches are mixed, so actual durations fall between the columns —
+but a batch sized against the photo column can run 7× longer than
+expected when it lands in video territory.
 
 Since the bottleneck is CPU time rather than any quota (spec 1.13 —
 inbound transfer is free and Mega's allowance is not a constraint), the
