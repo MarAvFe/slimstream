@@ -143,6 +143,20 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(config)
     logger = logging.getLogger("slimstream.cli")
 
+    # Not fatal — it works today — but it is a live footgun worth naming on
+    # every run. Trashed originals keep sitting inside the tree discovery
+    # scans, and are only invisible because mega.list() happens not to
+    # recurse (D6). If recursion is ever added, every trashed original gets
+    # rediscovered at its new path, earns a new file_id, and is
+    # re-processed from scratch.
+    if config.mega_trash_path.rstrip("/").startswith(config.mega_camera_path.rstrip("/") + "/"):
+        logger.warning(
+            "MEGA_TRASH_PATH (%s) is inside MEGA_CAMERA_PATH (%s); safe only while "
+            "listing is non-recursive. Prefer a trash folder outside the scanned tree.",
+            config.mega_trash_path,
+            config.mega_camera_path,
+        )
+
     manifest = Manifest(config.manifest_db_path)
     mega = MegaClient()
 

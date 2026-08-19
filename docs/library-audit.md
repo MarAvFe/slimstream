@@ -180,3 +180,49 @@ Probed MEGAcmd exit codes (undocumented):
 |---|---|
 | 53 | `Couldn't find "<path>"` — missing file or folder |
 | 54 | `Folder already exists: <name>` |
+
+## A3 revisited — `captured_at` is reliable after all (2026-08-19)
+
+Phase 0's A3 concluded that Mega's reported timestamp is *upload* time
+rather than capture date, and `RETENTION_KEY` was defaulted to
+`discovered_at` because of it. Measured against the real library, that
+conclusion is wrong.
+
+A3 tested by running `mega-get` then `mega-put` — a **manual re-upload**,
+which naturally stamps a fresh mtime. That is not how this library was
+populated. Files delivered by Mega's camera-upload feature preserve the
+phone's file mtime, which is the capture time.
+
+Comparing Pixel's own filename (`YYYY-MM-DD HH.MM.SS.ext`, local time)
+against `captured_at` (Mega mtime, UTC) across all 22,139 records:
+
+| | count | share |
+|---|---|---|
+| filename date == `captured_at` | 16,818 | 76.0 % |
+| `captured_at` is next day, filename time ≥ 18:00 | 5,172 | 23.4 % |
+| **consistent with UTC−6 capture time** | **21,990** | **99.3 %** |
+| unexplained (likely re-uploads / edited copies) | 149 | 0.7 % |
+
+Every mismatch is exactly +1 day and clusters in the evening — the
+signature of a UTC−6 local time crossing midnight in UTC, not of a
+corrupted or upload-derived timestamp.
+
+### What this changes
+
+`captured_at` is usable, so the retention key is now a real choice rather
+than a forced fallback:
+
+| | effect on the current backlog |
+|---|---|
+| `discovered_at` (current) | everything was discovered 2026-08-19, so **nothing is deletable until 2026-09-18** |
+| `captured_at` | all 920 verified files are **immediately deletable** (they are 2014–2025 photos) |
+
+Verified against the live manifest: Job B selects **0** files today under
+`discovered_at` and **920** under `captured_at`.
+
+Worth noting the accident is a useful one. `discovered_at` gives the
+first bulk run a free 30-day quarantine in which the compressed copy and
+the original both exist, which is exactly the review window Phase 4/5
+asks for — and in steady state, once caught up, `discovered_at` is within
+a day of capture date anyway. `captured_at` is the right switch only if
+the goal is to reclaim the backlog's space sooner than a month from now.
