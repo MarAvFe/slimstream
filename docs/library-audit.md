@@ -239,3 +239,54 @@ the original both exist, which is exactly the review window Phase 4/5
 asks for — and in steady state, once caught up, `discovered_at` is within
 a day of capture date anyway. `captured_at` is the right switch only if
 the goal is to reclaim the backlog's space sooner than a month from now.
+
+## Reviewing 22k files sustainably
+
+You cannot eyeball 22,000 compressed files, and you do not have to. Three
+independent safety layers stand between a bad transcode and a lost
+memory, so the review is a sampling problem, not an exhaustive one:
+
+1. **The retention window.** With `RETENTION_KEY=discovered_at` nothing
+   is deletable until 30 days after discovery — 2026-09-18 for this
+   backlog. Raising `RETENTION_DAYS` extends it.
+2. **Job B moves, it does not delete.** Originals go to
+   `MEGA_TRASH_PATH`, intact.
+3. **Emptying the trash is manual** and deliberately out of scope for
+   automation (spec 1.8). Nothing is irreversible until you do it by hand.
+
+So the review deadline is *before emptying trash*, not before finishing
+the backlog. `scripts/review_sample.py` turns the job into a short list:
+
+- **outliers on both tails** — a ratio near zero can mean degenerate
+  output that still passed the decodable check; a ratio near 100 % can
+  mean the transcode barely ran
+- **a stratified random sample** across media type and capture year, so
+  the check spans old and new rather than whatever sorts first
+
+Run it, open the printed Mega paths on a phone, and you are reviewing
+~30 files instead of 22,000.
+
+### What it found in the first 920
+
+| band | files |
+|---|---|
+| 0–1 % | 11 |
+| 1–5 % | 330 |
+| 5–10 % | 216 |
+| 10–20 % | 342 |
+| 20–40 % | 14 |
+| 40–60 % | 1 |
+| 60–101 % | 5 |
+
+Three things worth a human's eyes:
+
+- **2 files ended up larger than the original** — both ~10 KB 2014
+  thumbnails. Re-encoding an already-tiny image to 1200 px/q60 can add
+  bytes. Harmless at this scale (tens of bytes) but it shows a missing
+  guard: files below some size threshold should be skipped rather than
+  processed, since there is nothing to win.
+- **11 files compressed below 1 %** (9–16 MB → 20–70 KB). Plausible for
+  very high-resolution originals downscaled to 1200 px, but a 400×
+  reduction deserves a look before it is trusted.
+- **4 barely-compressed files**, mostly PNGs at 61–70 %. Small PNG
+  screenshots do not benefit from the still-image path.
