@@ -19,8 +19,11 @@ from slimstream.manifest import (
     Manifest,
     STATE_COMPRESSED,
     STATE_COMPRESSING,
+    STATE_DISCOVERED,
     STATE_FAILED,
     STATE_ORIGINAL_DELETED,
+    STATE_KEEPER,
+    STATE_SKIPPED_SMALL,
     STATE_UPLOADED,
     STATE_VERIFIED,
     compute_file_id,
@@ -108,6 +111,7 @@ def run_discovery(manifest: Manifest, mega: MegaClient, config: Config) -> int:
     """
     entries = mega.list(config.mega_camera_path)
     inserted = 0
+    skipped_small = 0
     for entry in entries:
         if entry.is_dir:
             continue
@@ -116,7 +120,20 @@ def run_discovery(manifest: Manifest, mega: MegaClient, config: Config) -> int:
             logger.warning("skipping unrecognized file type: %s", entry.path)
             continue
 
-        is_keeper = _is_under_keepers(entry.path, config.mega_keepers_path)
+        # Keeper wins over the size check: a file the human deliberately
+        # set aside stays a keeper regardless of how small it is.
+        if _is_under_keepers(entry.path, config.mega_keepers_path):
+            initial_state = STATE_KEEPER
+        elif entry.size < config.min_size_bytes:
+            # Terminal, never `verified`. The original stays as the only
+            # copy, so it must also never become deletable — compressing
+            # it would produce a *larger* file, and deleting it with no
+            # replacement would lose it outright.
+            initial_state = STATE_SKIPPED_SMALL
+            skipped_small += 1
+        else:
+            initial_state = STATE_DISCOVERED
+
         before = manifest.get(compute_file_id(entry.path, entry.size, entry.mtime_iso))
         manifest.upsert_discovered(
             original_path=entry.path,
@@ -124,10 +141,16 @@ def run_discovery(manifest: Manifest, mega: MegaClient, config: Config) -> int:
             captured_at=entry.mtime_iso,  # EXIF extraction happens at download time; see A3
             media_type=media_type,
             node_handle=entry.node_handle,
-            is_keeper=is_keeper,
+            initial_state=initial_state,
         )
         if before is None:
             inserted += 1
+    if skipped_small:
+        logger.info(
+            "%d file(s) below MIN_SIZE_BYTES=%d left uncompressed (original kept as-is)",
+            skipped_small,
+            config.min_size_bytes,
+        )
     return inserted
 
 

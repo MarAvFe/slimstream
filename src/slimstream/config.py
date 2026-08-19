@@ -41,6 +41,7 @@ class Config:
     log_dir: Path
 
     settling_minutes: int
+    min_size_bytes: int
     manifest_export_enabled: bool
     dry_run_upload: bool
     dry_run_delete: bool
@@ -188,6 +189,16 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     )
     manifest_export_enabled = _parse_bool(env, "MANIFEST_EXPORT_ENABLED", default=True)
 
+    # Below this, compressing is pointless or actively counterproductive:
+    # a 1200px/q60 JPEG has a practical floor around 30-100 KB, so a
+    # smaller original can only grow. Measured on the real library, the
+    # 0-25 KB band averaged 100.7% of original (every file got bigger)
+    # while 25-50 KB already compressed to 21%. 32 KB sits just above the
+    # losing band without skipping anything that would benefit.
+    min_size_bytes = _parse_int(env, "MIN_SIZE_BYTES", default=32768)
+    if min_size_bytes < 0:
+        raise ConfigError(f"MIN_SIZE_BYTES must be >= 0, got {min_size_bytes}")
+
     max_batch_size = _parse_int(env, "MAX_BATCH_SIZE", default=100)
     if max_batch_size <= 0:
         raise ConfigError(f"MAX_BATCH_SIZE must be positive, got {max_batch_size}")
@@ -209,6 +220,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         manifest_db_path=manifest_db_path,
         log_dir=log_dir,
         settling_minutes=settling_minutes,
+        min_size_bytes=min_size_bytes,
         manifest_export_enabled=manifest_export_enabled,
         dry_run_upload=dry_run_upload,
         dry_run_delete=dry_run_delete,

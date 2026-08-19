@@ -19,6 +19,7 @@ from slimstream.manifest import (
     STATE_COMPRESSING,
     STATE_DISCOVERED,
     STATE_FAILED,
+    STATE_KEEPER,
     STATE_ORIGINAL_DELETED,
     STATE_UPLOADED,
     STATE_VERIFIED,
@@ -41,7 +42,7 @@ def _discover(manifest, path="Camera Uploads/IMG_0001.jpg", size=1000, captured=
         captured_at=captured,
         media_type="photo",
         node_handle="H:AAAAAAAA",
-        is_keeper=False,
+        initial_state=STATE_DISCOVERED,
     )
 
 
@@ -200,7 +201,7 @@ def test_keeper_is_terminal_and_excluded_from_pending(manifest):
         captured_at="2026-01-01T00:00:00Z",
         media_type="video",
         node_handle="H:CCCCCCCC",
-        is_keeper=True,
+        initial_state=STATE_KEEPER,
     )
     assert rec.state == "keeper"
     assert rec not in manifest.get_pending()
@@ -231,7 +232,7 @@ def _populate(manifest, n=3):
             captured_at=f"2026-01-{i + 1:02d}",
             media_type="photo",
             node_handle=f"H:{i:08d}",
-            is_keeper=False,
+            initial_state=STATE_DISCOVERED,
         )
         ids.append(rec.file_id)
     return ids

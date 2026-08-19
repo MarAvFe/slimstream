@@ -38,6 +38,7 @@ STATE_COMPRESSED = "compressed"
 STATE_UPLOADED = "uploaded"
 STATE_VERIFIED = "verified"
 STATE_ORIGINAL_DELETED = "original_deleted"
+STATE_SKIPPED_SMALL = "skipped_small"
 STATE_PUBLISHED = "published"
 STATE_FAILED = "failed"
 
@@ -49,11 +50,16 @@ ALL_STATES = {
     STATE_UPLOADED,
     STATE_VERIFIED,
     STATE_ORIGINAL_DELETED,
+    STATE_SKIPPED_SMALL,
     STATE_PUBLISHED,
     STATE_FAILED,
 }
 
-TERMINAL_STATES = {STATE_KEEPER, STATE_ORIGINAL_DELETED}
+TERMINAL_STATES = {STATE_KEEPER, STATE_ORIGINAL_DELETED, STATE_SKIPPED_SMALL}
+
+# States a record may be created in. Everything else must be reached by a
+# guarded transition.
+INITIAL_STATES = {STATE_DISCOVERED, STATE_KEEPER, STATE_SKIPPED_SMALL}
 
 # Legal transitions: from_state -> set of allowed to_states.
 # This is the single source of truth for the state machine (spec 1.6).
@@ -66,6 +72,11 @@ _LEGAL_TRANSITIONS: dict[str, set[str]] = {
     STATE_ORIGINAL_DELETED: set(),
     STATE_PUBLISHED: set(),
     STATE_KEEPER: set(),
+    # Terminal, and deliberately so. A file too small to benefit from
+    # compression keeps its original as the only copy, so it must never
+    # reach `verified` — Job B deletes verified originals, and with no
+    # compressed replacement that would be outright data loss.
+    STATE_SKIPPED_SMALL: set(),
     # failed -> compressing only (retry re-enters the pipeline at the
     # compress step; discovery-level failures also retry from compressing
     # since discovery itself doesn't do failable work beyond the insert).
@@ -247,20 +258,30 @@ class Manifest:
         captured_at: str | None,
         media_type: str,
         node_handle: str | None,
-        is_keeper: bool,
+        initial_state: str = STATE_DISCOVERED,
     ) -> ManifestRecord:
-        """Insert a newly-listed file as `discovered` (or `keeper`).
+        """Insert a newly-listed file in one of the INITIAL_STATES.
+
+        Takes the state explicitly rather than a set of booleans: the
+        caller already knows whether this is a keeper, a too-small file,
+        or ordinary work, and encoding that as flags here would mean
+        re-deriving precedence rules inside the manifest.
 
         A no-op if file_id already exists (re-running discovery on the same
         listing must not duplicate or reset rows) — this is what makes
         discovery idempotent (guide Phase 2 definition-of-done, item c).
         """
+        if initial_state not in INITIAL_STATES:
+            raise IllegalTransitionError(
+                f"{initial_state!r} is not a valid initial state {sorted(INITIAL_STATES)}"
+            )
+
         file_id = compute_file_id(original_path, original_size, captured_at or "")
         existing = self.get(file_id)
         if existing is not None:
             return existing
 
-        state = STATE_KEEPER if is_keeper else STATE_DISCOVERED
+        state = initial_state
         now = _utcnow_iso()
         with self._transaction() as conn:
             conn.execute(

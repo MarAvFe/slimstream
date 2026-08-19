@@ -44,6 +44,7 @@ def make_config(tmp_path, **overrides) -> Config:
         manifest_db_path=tmp_path / "manifest.db",
         log_dir=tmp_path / "logs",
         settling_minutes=15,
+        min_size_bytes=0,  # fixtures use tiny files; size-skip covered by its own tests
         manifest_export_enabled=False,  # cli-level concern; not exercised by worker tests
         dry_run_upload=True,
         dry_run_delete=True,
@@ -448,7 +449,7 @@ def _verified_record(manifest, path, captured_at):
         captured_at=captured_at,
         media_type="photo",
         node_handle="H:XXXXXXXX",
-        is_keeper=False,
+        initial_state="discovered",
     )
     manifest.transition(rec.file_id, "compressing")
     manifest.transition(rec.file_id, "compressed", compressed_path="x", compressed_size=10)
@@ -511,7 +512,7 @@ def test_job_b_never_touches_non_verified_even_if_old(tmp_path, manifest):
         captured_at=old_iso,
         media_type="photo",
         node_handle="H:ZZZZZZZZ",
-        is_keeper=False,
+        initial_state="discovered",
     )
 
     mega = FakeMegaClient([])
@@ -638,3 +639,68 @@ def test_reaped_record_eventually_parks_instead_of_looping(tmp_path, manifest):
 
     assert result.parked_for_retries == 1
     assert result.succeeded == 0
+
+
+# --- MIN_SIZE_BYTES --------------------------------------------------------
+
+
+def test_files_below_min_size_are_skipped_not_compressed(tmp_path, manifest):
+    config = make_config(tmp_path, dry_run_upload=False, min_size_bytes=32768)
+    entries = [
+        RemoteEntry(path="/Camera Uploads/tiny.jpg", size=10_038, is_dir=False,
+                    node_handle="H:TINY0001", mtime_iso="2014-11-14"),
+        RemoteEntry(path="/Camera Uploads/big.jpg", size=2_000_000, is_dir=False,
+                    node_handle="H:BIG00001", mtime_iso="2026-01-01"),
+    ]
+    mega = FakeMegaClient(entries)
+
+    run_job_a(manifest, mega, config)
+
+    states = {
+        r["original_path"].rsplit("/", 1)[-1]: r["state"]
+        for r in manifest._conn.execute("SELECT original_path, state FROM files")
+    }
+    assert states["tiny.jpg"] == "skipped_small"
+    assert states["big.jpg"] == STATE_VERIFIED
+    # the tiny file was never downloaded or uploaded
+    assert mega.downloaded == ["/Camera Uploads/big.jpg"]
+    assert len(mega.uploaded) == 1
+
+
+def test_skipped_small_is_terminal_and_never_deletable(tmp_path, manifest):
+    """The load-bearing property: a skipped file's original is the ONLY
+    copy, so it must never become deletable. If it could reach `verified`,
+    Job B would move the original to trash leaving no replacement at all.
+    """
+    config = make_config(tmp_path, dry_run_upload=False, min_size_bytes=32768)
+    mega = FakeMegaClient([
+        RemoteEntry(path="/Camera Uploads/tiny.jpg", size=1000, is_dir=False,
+                    node_handle="H:TINY0001", mtime_iso="2014-11-14"),
+    ])
+    run_job_a(manifest, mega, config)
+
+    rec = manifest._conn.execute("SELECT * FROM files").fetchone()
+    assert rec["state"] == "skipped_small"
+
+    # not selectable for work, and not selectable for deletion at any cutoff
+    assert manifest.get_pending() == []
+    assert manifest.get_deletable("2099-01-01", retention_key="captured_at") == []
+    assert manifest.get_stranded_in_flight() == []
+
+    # and it is terminal: no transition leads out of it
+    from slimstream.manifest import IllegalTransitionError
+    for target in (STATE_VERIFIED, "compressing", STATE_FAILED):
+        with pytest.raises(IllegalTransitionError):
+            manifest.transition(rec["file_id"], target)
+
+
+def test_keeper_wins_over_min_size(tmp_path, manifest):
+    """A file the human deliberately set aside stays a keeper even if it
+    is below the size threshold."""
+    config = make_config(tmp_path, dry_run_upload=False, min_size_bytes=32768)
+    mega = FakeMegaClient([
+        RemoteEntry(path="/Camera Uploads/keepers/tiny.jpg", size=500, is_dir=False,
+                    node_handle="H:KEEP0001", mtime_iso="2026-01-01"),
+    ])
+    run_job_a(manifest, mega, config)
+    assert manifest._conn.execute("SELECT state FROM files").fetchone()["state"] == "keeper"
