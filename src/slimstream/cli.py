@@ -71,10 +71,11 @@ def _job_a_summary_line(config: Config, result: JobAResult) -> str:
     # succeeded/failed are reported separately and never merged into one
     # "processed" number: a batch where every file errored must not read
     # as a batch of work done, since runs.log is the monitoring surface.
+    reaped = f" reaped={result.reaped}" if result.reaped else ""
     return (
         f"job-a  {mode}  batch<={config.max_batch_size}  "
-        f"discovered={result.discovered} ok={result.succeeded} failed={result.failed} "
-        f"parked={result.parked_for_retries} still_pending={result.still_pending}"
+        f"discovered={result.discovered} ok={result.succeeded} failed={result.failed}"
+        f"{reaped} parked={result.parked_for_retries} still_pending={result.still_pending}"
     )
 
 

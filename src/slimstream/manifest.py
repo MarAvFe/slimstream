@@ -299,10 +299,39 @@ class Manifest:
         return ManifestRecord.from_row(row) if row is not None else None
 
     def get_pending(self) -> list[ManifestRecord]:
-        """Files Job A should work on: discovered or failed (for retry)."""
+        """Files Job A should work on: discovered or failed (for retry).
+
+        Deliberately excludes `compressing`: a record in that state is
+        either being worked on right now, or was stranded by a worker
+        that died mid-file. Stranded ones are recovered by
+        `get_stranded_compressing()` + an explicit reap at the start of
+        the run, not by being silently re-selected here.
+        """
         rows = self._conn.execute(
             "SELECT * FROM files WHERE state IN (?, ?) ORDER BY discovered_at ASC",
             (STATE_DISCOVERED, STATE_FAILED),
+        ).fetchall()
+        return [ManifestRecord.from_row(r) for r in rows]
+
+    def get_stranded_compressing(self) -> list[ManifestRecord]:
+        """Records left in `compressing` by a worker that died mid-file.
+
+        Spec 1.12 promises "next run resumes; idempotent by design", but
+        nothing delivered that: `get_pending()` selects only `discovered`
+        and `failed`, so a crash (or, as seen in production, an SSH
+        disconnect killing a long run) stranded the in-flight record
+        permanently. It would never be compressed and — since Job B only
+        ever touches `verified` — never deleted either: silently dropped
+        out of the pipeline with no error anywhere.
+
+        Assumes Job A does not run concurrently with itself, which is
+        already required (overlapping runs would double-process the same
+        files) and holds for both the systemd `Type=oneshot` unit and
+        manual invocation.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM files WHERE state = ? ORDER BY discovered_at ASC",
+            (STATE_COMPRESSING,),
         ).fetchall()
         return [ManifestRecord.from_row(r) for r in rows]
 

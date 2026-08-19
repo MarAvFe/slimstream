@@ -18,6 +18,7 @@ from slimstream.manifest import Manifest, STATE_FAILED, STATE_VERIFIED
 from slimstream.mega_client import RemoteEntry
 import slimstream.worker as worker_mod
 from slimstream.worker import (
+    run_discovery,
     run_job_a,
     run_job_b,
     should_run_job_b_today,
@@ -538,3 +539,49 @@ def test_should_run_job_b_today_on_run_day(tmp_path):
 def test_should_run_job_b_today_clamps_short_month(tmp_path):
     config = make_config(tmp_path, retention_run_day=30)
     assert should_run_job_b_today(config, datetime(2026, 2, 28, tzinfo=timezone.utc)) is True
+
+
+def test_job_a_reaps_records_stranded_in_compressing(tmp_path, manifest):
+    """A worker that dies mid-file (crash, OOM, or an SSH disconnect
+    killing a long interactive run — all observed in production) leaves a
+    record in `compressing`. get_pending() selects only discovered/failed,
+    so without an explicit reap that record is stranded forever: never
+    compressed, and never deleted either since Job B only touches
+    `verified`. It just silently falls out of the pipeline.
+    """
+    config = make_config(tmp_path, dry_run_upload=False)
+    mega = FakeMegaClient(_make_entries(1))
+
+    # simulate the interrupted run: discovered -> compressing, then death
+    run_discovery(manifest, mega, config)
+    stranded = manifest.get_pending()[0]
+    manifest.transition(stranded.file_id, "compressing")
+
+    assert manifest.get_pending() == []  # invisible to normal selection
+
+    result = run_job_a(manifest, mega, config)
+
+    assert result.reaped == 1
+    assert result.succeeded == 1  # recovered and processed in the same run
+    reloaded = manifest.get(stranded.file_id)
+    assert reloaded.state == STATE_VERIFIED
+    # went back through the failed path, so repeated crashes still climb
+    # towards MAX_RETRIES rather than looping forever
+    assert reloaded.retry_count == 1
+
+
+def test_reaped_record_eventually_parks_instead_of_looping(tmp_path, manifest):
+    """A file that reliably kills the worker must not be reaped forever."""
+    config = make_config(tmp_path, dry_run_upload=False)
+    mega = FakeMegaClient(_make_entries(1))
+
+    run_discovery(manifest, mega, config)
+    rec = manifest.get_pending()[0]
+    for _ in range(worker_mod.MAX_RETRIES):
+        manifest.transition(rec.file_id, "compressing")
+        manifest.transition(rec.file_id, STATE_FAILED, error="boom")
+
+    result = run_job_a(manifest, mega, config)
+
+    assert result.parked_for_retries == 1
+    assert result.succeeded == 0

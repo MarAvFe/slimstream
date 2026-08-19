@@ -44,6 +44,7 @@ MAX_RETRIES = 5
 @dataclass(frozen=True)
 class JobAResult:
     discovered: int  # newly inserted this run (0 on a rerun over the same listing)
+    reaped: int  # stranded 'compressing' records recovered for retry
     succeeded: int
     failed: int
     parked_for_retries: int
@@ -296,6 +297,24 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> JobAResul
     """
     _check_not_paused(manifest)
 
+    # Recover anything a previous run stranded mid-file (crash, OOM, or an
+    # SSH disconnect killing a long interactive run — all observed). These
+    # go back through the normal `failed` retry path rather than being
+    # resumed in place, so retry_count still climbs and a file that
+    # reliably kills the worker eventually gets parked instead of looping.
+    reaped = 0
+    for record in manifest.get_stranded_compressing():
+        logger.warning(
+            "reaping %s stranded in 'compressing' by an earlier interrupted run",
+            record.file_id,
+        )
+        manifest.transition(
+            record.file_id,
+            STATE_FAILED,
+            error="interrupted mid-processing by an earlier run; reaped for retry",
+        )
+        reaped += 1
+
     discovered = run_discovery(manifest, mega, config)
 
     pending = manifest.get_pending()
@@ -330,6 +349,7 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> JobAResul
     )
     return JobAResult(
         discovered=discovered,
+        reaped=reaped,
         succeeded=succeeded,
         failed=failed,
         parked_for_retries=skipped_for_retries,

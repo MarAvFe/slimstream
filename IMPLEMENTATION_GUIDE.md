@@ -106,6 +106,16 @@ Resulting rules, all now enforced by tests:
 
 `scripts/audit_library.py` re-runs the whole parser against a real account and reports any row it cannot handle. **Run it after any MEGAcmd upgrade** — it is the cheapest way to catch a format regression before a scheduled run silently discovers zero files. Measured results live in `docs/library-audit.md`.
 
+### D9 — Records stranded in `compressing` are reaped, not orphaned (resolved 2026-08-19)
+
+Spec 1.12 claims a worker crashing mid-transcode is "stuck at `compressing`; next run resumes; idempotent by design." Nothing implemented that. `get_pending()` selects only `discovered` and `failed`, so an interrupted run stranded its in-flight record **permanently and silently**: never compressed, and never deleted either, since Job B only ever selects `verified`. The file simply fell out of the pipeline with no error recorded anywhere.
+
+Found in production when an SSH disconnect (`client_loop: send disconnect: Broken pipe`) killed a long interactive run and left exactly that state behind. This is not an edge case — it is the expected outcome of any long run over a plain SSH session, plus every crash, OOM, or VM reboot.
+
+Job A now reaps stranded records at the start of each run, routing them back through the normal `failed` path rather than resuming them in place. Going via `failed` is deliberate: `retry_count` still climbs, so a file that reliably kills the worker eventually parks for human review instead of being reaped and re-killed forever. The count surfaces in `runs.log` as `reaped=N`.
+
+This assumes Job A never runs concurrently with itself — already required (overlapping runs would double-process) and true for both the systemd `Type=oneshot` unit and manual invocation. Note the practical corollary: **run large batches detached** (`nohup`, `tmux`, or the systemd unit), not from an interactive SSH session that a dropped connection can kill.
+
 ### D8 — Run summaries report successes and failures separately (resolved 2026-08-19)
 
 `JobAResult` counted every *attempt* as `processed`, so a batch in which all 20 files errored still wrote `processed=20` to `runs.log`. For an unattended pipeline whose monitoring surface is that one line, a summary that reports total failure as work done is worse than no summary. `succeeded` and `failed` are now tracked and printed separately, and `_process_one` returns whether the file reached a good terminal state.

@@ -34,6 +34,54 @@ touched. Deliberate: compressing them through the still-image path would
 flatten the animation to a single JPEG frame. Revisit only if animated
 output matters.
 
+## Measured runs (2026-08-19)
+
+Wall-clock from the first real `job-a` runs against the live library,
+`DRY_RUN_UPLOAD=false`, on the `s-2vcpu-2gb` droplet.
+
+| run | batch | wall clock | per file |
+|---|---|---|---|
+| 1 | 20 | 17:57:01 → 17:58:03 = **62 s** | 3.10 s |
+| 2 | 200 | 19:02:27 → 19:13:52 = **11 m 25 s** | 3.42 s |
+
+Per-file timing from the manifest (gaps between consecutive
+`verified_at`, 218 samples): **avg 3.37 s, min 1.68 s, max 7.86 s**.
+
+Timings include discovery, which re-lists and re-checks all ~22k rows on
+every run. That is a fixed overhead of roughly 1–2 s per run, so it is
+noise at batch 200 and would be pure waste at batch 5.
+
+### Measured compression, first 220 files
+
+| media | files | original | compressed | ratio |
+|---|---|---|---|---|
+| photo | 220 | 610.0 MB | 21.9 MB | **3.6 %** |
+| video | 0 | — | — | not yet measured |
+
+**Both caveats matter before extrapolating:**
+
+1. **No videos have been processed yet.** Files are handled oldest-first,
+   and the oldest ~2,000 are 2014-era photos. Videos are 58 % of the
+   bytes and are far slower per file, so the 3.37 s/file figure is a
+   photo-only measurement and will rise sharply once videos appear.
+2. **3.6 % is not representative of the whole library.** These are old,
+   large-dimension photos being downscaled hard to 1200 px. The
+   2026-08-18 tuning sweep on *recent* Pixel photos measured ~12.7 % at
+   the same settings. Expect the real library-wide photo ratio to land
+   between the two, nearer 12 % for anything modern.
+
+### Revised projection
+
+Photo-only extrapolation, for the ~19,720 remaining photos at 3.37 s:
+**≈ 18 hours** of compute. Videos are unmeasured; at a plausible
+20–60 s each, 2,424 videos add **13–40 hours**. Total order of magnitude
+is therefore **a day and a half to two and a half days of CPU**, not
+weeks — the calendar time below is dominated by how often you choose to
+run, not by the work itself.
+
+Re-measure once the first video batch completes; that is the number that
+actually decides the schedule.
+
 ## Projected savings
 
 Using the compression ratios actually measured in the 2026-08-18 tuning
@@ -62,11 +110,30 @@ always lists everything). For 22,144 backlogged files at one run per day:
 | 500 | **44** |
 | 1000 | 22 |
 
-**20 is not viable for the initial catch-up.** Suggested approach: run
-the first real batch at 100 to measure actual wall-clock throughput and
-review output quality across a real spread of files, then raise to ~500.
-Videos are the slow part, so the mix in a given batch matters more than
-the count — measure before committing to a number.
+**20 is not viable for the initial catch-up.** With measured throughput
+of ~3.4 s/file (photos), the wall clock per run is:
+
+| `MAX_BATCH_SIZE` | run duration (photos) |
+|---|---|
+| 200 | ~11 min *(measured)* |
+| 500 | ~28 min |
+| 1000 | ~57 min |
+| 2000 | ~1 h 55 m |
+
+Since the bottleneck is CPU time rather than any quota (spec 1.13 —
+inbound transfer is free and Mega's allowance is not a constraint), the
+backlog can be cleared with a handful of large runs rather than a year of
+small daily ones. Videos will slow this down considerably; re-check after
+the first batch that contains them.
+
+**Long runs over plain SSH get killed by disconnects** — this already
+happened once and stranded a record in `compressing` (see D9). Run big
+batches detached:
+
+```bash
+nohup .venv/bin/slimstream job-a > /dev/null 2>&1 &
+tail -f ~/slimstream/logs/slimstream.log
+```
 
 Once the backlog is cleared, steady-state volume is only whatever the
 phone uploads each day, so the cap stops being the limiting factor.
