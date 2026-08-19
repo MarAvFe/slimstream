@@ -105,23 +105,30 @@ def _parse_ls_line(line: str, *, parent_path: str) -> RemoteEntry:
     if len(parts) < _LS_MIN_FIELDS:
         raise MegaParseError(f"unrecognized mega-ls line shape: {line!r}")
 
-    flags, _vers, size_str, mtime, handle, name = parts
+    flags, vers, size_str, mtime, handle, name = parts
 
     if not _LS_FLAGS_RE.match(flags):
         raise MegaParseError(f"unrecognized flags column {flags!r} in line: {line!r}")
     if not handle.startswith("H:"):
         raise MegaParseError(f"unrecognized handle column {handle!r} in line: {line!r}")
 
-    try:
-        size = int(size_str)
-    except ValueError as exc:
-        raise MegaParseError(f"non-integer size in line: {line!r}") from exc
+    is_dir = flags[0] == "d"
 
-    # Directory flag shape is unconfirmed against real output (Phase 0
-    # only exercised plain files) — deliberately not guessed. is_dir stays
-    # False here; a real directory listing will surface as a parse
-    # failure until this is confirmed and encoded explicitly.
-    is_dir = False
+    # Directory rows print "-" for both VERS and SIZE (confirmed real
+    # output: "d---    -            - 2026-08-18 H:mZ80GSKI keepers").
+    # Files always have a real integer size; a "-" on a file row is not
+    # something we've seen and isn't guessed at — it still raises.
+    if is_dir:
+        if size_str != "-":
+            raise MegaParseError(
+                f"expected '-' size for directory row, got {size_str!r} in line: {line!r}"
+            )
+        size = 0
+    else:
+        try:
+            size = int(size_str)
+        except ValueError as exc:
+            raise MegaParseError(f"non-integer size in line: {line!r}") from exc
 
     full_path = f"{parent_path.rstrip('/')}/{name}"
 

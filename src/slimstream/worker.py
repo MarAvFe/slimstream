@@ -76,6 +76,17 @@ def _media_type_for(path: str) -> str | None:
 
 
 def _is_under_keepers(remote_path: str, keepers_path: str) -> bool:
+    """Defense in depth, not the only thing protecting keepers today.
+
+    mega.list() currently only lists the top level of a folder (no
+    recursion), so files inside MEGA_KEEPERS_PATH are never even returned
+    by discovery's listing call right now — this check never fires in
+    practice on a flat Camera Uploads. It stays anyway: if list() is ever
+    made recursive (e.g. to support nested album folders), this is what
+    keeps keepers content from being silently swept into the compress
+    pipeline instead of relying on "list() happens not to recurse" as the
+    only safety net.
+    """
     return remote_path.rstrip("/").startswith(keepers_path.rstrip("/") + "/") or remote_path.rstrip("/") == keepers_path.rstrip("/")
 
 

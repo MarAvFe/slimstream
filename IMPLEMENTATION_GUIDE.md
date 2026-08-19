@@ -79,6 +79,12 @@ Two benefits, one basically free once the other is chosen:
 
 This doesn't replace the D2 nightly manifest export (still worth having, for full state — retry counts, failure history, etc.) — it specifically closes the worst failure mode of manifest loss: silent double-processing of already-compressed media.
 
+### D6 — `mega.list()` is not recursive; keepers protection is defense in depth, not the only guard (found 2026-08-19)
+
+`mega.list(path)` only lists the **top level** of a folder — it does not descend into subfolders. In production this first surfaced as a crash: `Camera Uploads` contains a real `keepers` subfolder, and the directory row in `mega-ls` output (`d---    -            - ... keepers`) wasn't handled by the parser, which only expected file rows. Fixed in `mega_client.py` (directory rows print `-` for both VERS and SIZE; `is_dir`/`size=0` now parsed explicitly, still raising if a directory row doesn't match that exact shape — D4c's fail-loud rule holds).
+
+**Separately, and more subtly:** because `list()` doesn't recurse, files placed *inside* `keepers` are never returned by discovery's listing call at all — `_is_under_keepers()`'s path-prefix check never actually fires on a real (flat) `Camera Uploads`, since nothing nested is ever seen in the first place. Today, on a flat library, `keepers` content is safe by construction (never listed, so never processed) — but `_is_under_keepers()` is kept anyway as **defense in depth**: if `list()` is ever made recursive (e.g. to support nested album folders), this check is what would actually stop `keepers` content from being swept into the compress pipeline, instead of relying on "list() happens not to recurse" as the only safety net. Deliberately not building recursion now — no deployer has a nested structure yet, and it would reopen the same untested-real-output risk A6 already exposed once for the flat case.
+
 ---
 
 ## Phase 0 — The assumption gate (human-run, before any pipeline code)

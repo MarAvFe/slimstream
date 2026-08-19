@@ -207,6 +207,25 @@ def test_job_a_keeper_excluded_and_untouched(tmp_path, manifest):
     assert row["state"] == "keeper"
 
 
+def test_is_under_keepers_matches_nested_paths():
+    """Unit-level check on the keeper-exclusion logic itself, independent
+    of whether mega.list() actually recurses today. This is deliberate
+    defense in depth (see _is_under_keepers docstring) — if list() is
+    ever made recursive, this is what has to still work correctly.
+    """
+    from slimstream.worker import _is_under_keepers
+
+    keepers = "/Camera Uploads/keepers"
+    assert _is_under_keepers("/Camera Uploads/keepers/wedding.mp4", keepers) is True
+    assert _is_under_keepers("/Camera Uploads/keepers/sub/nested.jpg", keepers) is True
+    assert _is_under_keepers("/Camera Uploads/keepers", keepers) is True  # exact match
+    assert _is_under_keepers("/Camera Uploads/keepers/", keepers) is True  # trailing slash
+
+    # must NOT match a sibling folder with keepers as a prefix
+    assert _is_under_keepers("/Camera Uploads/keepers-old/photo.jpg", keepers) is False
+    assert _is_under_keepers("/Camera Uploads/other/photo.jpg", keepers) is False
+
+
 def test_job_a_failure_never_deletes_original(tmp_path, manifest, monkeypatch):
     config = make_config(tmp_path, dry_run_upload=False)
     entries = [

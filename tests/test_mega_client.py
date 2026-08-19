@@ -52,7 +52,7 @@ def test_parses_real_captured_output(monkeypatch):
     client = MegaClient()
     entries = client.list("/slimstream-test")
 
-    assert len(entries) == 5  # header + path lines correctly skipped
+    assert len(entries) == 6  # header + path lines correctly skipped
 
     by_name = {e.path.rsplit("/", 1)[-1]: e for e in entries}
 
@@ -66,6 +66,11 @@ def test_parses_real_captured_output(monkeypatch):
     small = by_name["moved.txt"]
     assert small.size == 4
     assert small.node_handle == "H:vdElBb7Y"
+
+    keepers_dir = by_name["keepers"]
+    assert keepers_dir.is_dir is True
+    assert keepers_dir.size == 0
+    assert keepers_dir.node_handle == "H:mZ80GSKI"
 
 
 def test_parses_full_paths_correctly(monkeypatch):
@@ -121,3 +126,46 @@ def test_non_integer_size_raises(monkeypatch):
     client = MegaClient()
     with pytest.raises(MegaParseError):
         client.list("/slimstream-test")
+
+
+def test_directory_row_parses_with_dash_size(monkeypatch):
+    """Real captured output (2026-08-19, against /Camera Uploads which
+    contains a real 'keepers' subfolder): directory rows print '-' for
+    both VERS and SIZE, not a numeric size. This crashed run_discovery in
+    production before the parser handled it explicitly.
+    """
+    import slimstream.mega_client as mc
+
+    output = (
+        "/Camera Uploads/:\n"
+        "FLAGS VERS      SIZE    DATE          HANDLE NAME\n"
+        "d---    -            - 2026-08-18 H:mZ80GSKI keepers\n"
+    )
+    monkeypatch.setattr(mc, "_run", _FakeRun(output))
+
+    client = MegaClient()
+    entries = client.list("/Camera Uploads")
+
+    assert len(entries) == 1
+    assert entries[0].is_dir is True
+    assert entries[0].size == 0
+    assert entries[0].node_handle == "H:mZ80GSKI"
+    assert entries[0].path == "/Camera Uploads/keepers"
+
+
+def test_directory_row_with_unexpected_nonzero_size_raises(monkeypatch):
+    """A directory row with a real number instead of '-' hasn't been seen
+    in real output — raise rather than silently accept an unverified
+    shape (D4c)."""
+    import slimstream.mega_client as mc
+
+    output = (
+        "/Camera Uploads/:\n"
+        "FLAGS VERS SIZE DATE HANDLE NAME\n"
+        "d---    -      12345 2026-08-18 H:mZ80GSKI weird-dir\n"
+    )
+    monkeypatch.setattr(mc, "_run", _FakeRun(output))
+
+    client = MegaClient()
+    with pytest.raises(MegaParseError):
+        client.list("/Camera Uploads")
