@@ -3,7 +3,9 @@ name = "slimstream"
 version = "0.1.0"
 description = "Automated media compression pipeline: Mega source of truth, manifest-driven, reversible."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "python-dotenv>=1.0",
+]
 
 [project.optional-dependencies]
 dev = [

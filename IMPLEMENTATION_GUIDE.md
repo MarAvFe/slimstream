@@ -143,6 +143,8 @@ slimstream/
 2. Create `.env` with `chmod 600`.
 3. Config via env vars with validation **at startup, not at use** — a bad `RETENTION_DAYS` must fail before any file is touched, not midway through a delete loop.
 
+**`.env` loading is automatic — no manual `source .env` needed.** `cli.py` loads `.env` from the current working directory via `python-dotenv` before reading config, so `cd ~/slimstream/app && .venv/bin/slimstream job-a` just works. Real environment variables (e.g. set by systemd's `EnvironmentFile=`, or explicit shell `export`) always take priority over `.env` — this keeps manual runs, systemd, and cron all behaving the same way without requiring different invocation styles. Use `--env-file <path>` to point at a `.env` outside the working directory.
+
 ### Config surface (all defaults from spec 1.9 / 1.8)
 `MEGA_CAMERA_PATH`, `MEGA_KEEPERS_PATH`, `MEGA_TRASH_PATH`, `MEGA_COMPRESSED_ROOT`, `RETENTION_DAYS=30`, `RETENTION_RUN_DAY=30`, `RETENTION_KEY=discovered_at`, `VIDEO_HEIGHT=480`, `VIDEO_CRF=30`, `IMAGE_LONG_EDGE=1200`, `IMAGE_QUALITY=60`, `SCRATCH_DIR`, `MANIFEST_DB_PATH`, `LOG_DIR`, `DRY_RUN_UPLOAD=true`, `DRY_RUN_DELETE=true`, `SETTLING_MINUTES`, `MAX_BATCH_SIZE=100`.
 

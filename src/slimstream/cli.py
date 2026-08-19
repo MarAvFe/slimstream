@@ -19,6 +19,9 @@ import argparse
 import logging
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from slimstream.config import Config, ConfigError, load_config
 from slimstream.manifest import Manifest
@@ -80,8 +83,38 @@ def _job_b_summary_line(config: Config, result: JobBResult) -> str:
     )
 
 
+def _load_env_file(explicit_path: str | None) -> None:
+    """Load .env into the process environment before config.load_config()
+    reads it. Values already set in the real environment (e.g. by
+    systemd's EnvironmentFile=, or explicit shell export) are NOT
+    overridden — .env only fills gaps, so the same command behaves
+    correctly whether run manually, via systemd, or via cron, without
+    requiring `source .env` beforehand.
+    """
+    if explicit_path is not None:
+        path = Path(explicit_path)
+        if not path.is_file():
+            print(f"--env-file {explicit_path} not found", file=sys.stderr)
+            sys.exit(2)
+        load_dotenv(path, override=False)
+        return
+
+    # Default: .env in the current working directory. This matches the
+    # documented manual-run pattern (`cd ~/slimstream/app && slimstream
+    # job-a`) and systemd's WorkingDirectory=, so no flag is needed in
+    # either case — only an unusual invocation needs --env-file.
+    default_path = Path.cwd() / ".env"
+    if default_path.is_file():
+        load_dotenv(default_path, override=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="slimstream")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="path to a .env file to load (default: .env in the current directory)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     job_a = sub.add_parser("job-a", help="discover + compress new arrivals")
@@ -93,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    _load_env_file(args.env_file)
 
     try:
         config = load_config()
