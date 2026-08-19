@@ -541,6 +541,56 @@ def test_should_run_job_b_today_clamps_short_month(tmp_path):
     assert should_run_job_b_today(config, datetime(2026, 2, 28, tzinfo=timezone.utc)) is True
 
 
+@pytest.mark.parametrize("stranded_state", ["compressing", "compressed", "uploaded"])
+def test_job_a_reaps_records_stranded_in_any_in_flight_state(
+    tmp_path, manifest, stranded_state
+):
+    """All three non-terminal working states are strandable, not just
+    `compressing`: _process_one passes through
+    compressing -> compressed -> uploaded -> verified, and a hard kill
+    between any two steps parks the record in the earlier one. None of
+    them are selected by get_pending(), so all three must be reaped.
+    """
+    config = make_config(tmp_path, dry_run_upload=False)
+    mega = FakeMegaClient(_make_entries(1))
+
+    run_discovery(manifest, mega, config)
+    rec = manifest.get_pending()[0]
+    manifest.transition(rec.file_id, "compressing")
+    if stranded_state in ("compressed", "uploaded"):
+        manifest.transition(rec.file_id, "compressed", compressed_path="x", compressed_size=1)
+    if stranded_state == "uploaded":
+        manifest.transition(rec.file_id, "uploaded", node_handle="H:PARTIAL1")
+
+    assert manifest.get_pending() == []  # invisible to normal selection
+
+    result = run_job_a(manifest, mega, config)
+
+    assert result.reaped == 1
+    assert manifest.get(rec.file_id).state == STATE_VERIFIED
+
+
+def test_keyboard_interrupt_marks_record_failed_and_propagates(tmp_path, manifest, monkeypatch):
+    """Ctrl+C is a BaseException, so `except Exception` never caught it and
+    the in-flight record stayed stranded. It must be marked for retry, and
+    the interrupt must still stop the run.
+    """
+    config = make_config(tmp_path, dry_run_upload=False)
+    mega = FakeMegaClient(_make_entries(1))
+
+    def _interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(worker_mod, "transcode_image", _interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_job_a(manifest, mega, config)
+
+    row = manifest._conn.execute("SELECT * FROM files").fetchone()
+    assert row["state"] == STATE_FAILED
+    assert "interrupted" in row["error"].lower()
+
+
 def test_job_a_reaps_records_stranded_in_compressing(tmp_path, manifest):
     """A worker that dies mid-file (crash, OOM, or an SSH disconnect
     killing a long interactive run — all observed in production) leaves a

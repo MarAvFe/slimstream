@@ -112,7 +112,11 @@ Spec 1.12 claims a worker crashing mid-transcode is "stuck at `compressing`; nex
 
 Found in production when an SSH disconnect (`client_loop: send disconnect: Broken pipe`) killed a long interactive run and left exactly that state behind. This is not an edge case — it is the expected outcome of any long run over a plain SSH session, plus every crash, OOM, or VM reboot.
 
-Job A now reaps stranded records at the start of each run, routing them back through the normal `failed` path rather than resuming them in place. Going via `failed` is deliberate: `retry_count` still climbs, so a file that reliably kills the worker eventually parks for human review instead of being reaped and re-killed forever. The count surfaces in `runs.log` as `reaped=N`.
+**All three non-terminal working states are strandable, not just `compressing`.** `_process_one` walks compressing → compressed → uploaded → verified, and a process killed between any two steps parks the record in the earlier one; none of the three are selected by `get_pending()`. The first version of this fix only reaped `compressing` and was therefore still incomplete. Reaping `uploaded` is self-healing rather than wasteful: the retry's pre-download check (D5) finds the already-uploaded compressed copy at the mirrored path and short-circuits straight back to `verified` without redoing any work.
+
+`KeyboardInterrupt` is a `BaseException`, so `except Exception` never caught it — Ctrl+C during processing was one concrete way to create a stranded record. `_process_one` now marks the record failed and re-raises, so the interrupt still stops the run.
+
+Job A reaps stranded records at the start of each run, routing them back through the normal `failed` path rather than resuming them in place. Going via `failed` is deliberate: `retry_count` still climbs, so a file that reliably kills the worker eventually parks for human review instead of being reaped and re-killed forever. The count surfaces in `runs.log` as `reaped=N`.
 
 This assumes Job A never runs concurrently with itself — already required (overlapping runs would double-process) and true for both the systemd `Type=oneshot` unit and manual invocation. Note the practical corollary: **run large batches detached** (`nohup`, `tmux`, or the systemd unit), not from an interactive SSH session that a dropped connection can kill.
 

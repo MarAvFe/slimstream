@@ -272,6 +272,17 @@ def _process_one(
         manifest.transition(record.file_id, STATE_VERIFIED)
         return True
 
+    except KeyboardInterrupt:
+        # Ctrl+C is a BaseException, so `except Exception` below never saw
+        # it: the record stayed parked in whatever in-flight state it had
+        # reached, which is one way a stranded record gets created. Mark
+        # it failed so it retries normally, then re-raise so the run still
+        # stops immediately — an interrupt must remain an interrupt.
+        logger.warning("interrupted while processing %s; marking for retry", record.file_id)
+        manifest.transition(
+            record.file_id, STATE_FAILED, error="interrupted by user (KeyboardInterrupt)"
+        )
+        raise
     except Exception as exc:  # noqa: BLE001 — any failure -> failed state, never a delete
         logger.exception("processing failed for %s", record.file_id)
         manifest.transition(record.file_id, STATE_FAILED, error=str(exc))
@@ -303,15 +314,16 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> JobAResul
     # resumed in place, so retry_count still climbs and a file that
     # reliably kills the worker eventually gets parked instead of looping.
     reaped = 0
-    for record in manifest.get_stranded_compressing():
+    for record in manifest.get_stranded_in_flight():
         logger.warning(
-            "reaping %s stranded in 'compressing' by an earlier interrupted run",
+            "reaping %s stranded in %r by an earlier interrupted run",
             record.file_id,
+            record.state,
         )
         manifest.transition(
             record.file_id,
             STATE_FAILED,
-            error="interrupted mid-processing by an earlier run; reaped for retry",
+            error=f"interrupted mid-processing in {record.state!r}; reaped for retry",
         )
         reaped += 1
 

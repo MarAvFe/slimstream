@@ -313,16 +313,31 @@ class Manifest:
         ).fetchall()
         return [ManifestRecord.from_row(r) for r in rows]
 
-    def get_stranded_compressing(self) -> list[ManifestRecord]:
-        """Records left in `compressing` by a worker that died mid-file.
+    def get_stranded_in_flight(self) -> list[ManifestRecord]:
+        """Records left mid-pipeline by a worker that died before reaching
+        a terminal state.
 
         Spec 1.12 promises "next run resumes; idempotent by design", but
         nothing delivered that: `get_pending()` selects only `discovered`
-        and `failed`, so a crash (or, as seen in production, an SSH
-        disconnect killing a long run) stranded the in-flight record
+        and `failed`, so a hard interruption stranded the in-flight record
         permanently. It would never be compressed and — since Job B only
         ever touches `verified` — never deleted either: silently dropped
-        out of the pipeline with no error anywhere.
+        out of the pipeline with no error recorded anywhere.
+
+        All three non-terminal working states are strandable, not just
+        `compressing`. `_process_one` passes through
+        compressing → compressed → uploaded → verified, and a process
+        killed between any two of those steps leaves the record parked in
+        the earlier one:
+
+        - `compressing` — died during download or transcode
+        - `compressed`  — transcode finished, died before/during upload
+        - `uploaded`    — upload finished, died before the verify stamp
+
+        Reaping `uploaded` is safe and in fact self-healing: the retry's
+        pre-download check finds the already-present compressed copy at
+        the mirrored path and short-circuits straight back to `verified`
+        without redoing any work (D5).
 
         Assumes Job A does not run concurrently with itself, which is
         already required (overlapping runs would double-process the same
@@ -330,8 +345,8 @@ class Manifest:
         manual invocation.
         """
         rows = self._conn.execute(
-            "SELECT * FROM files WHERE state = ? ORDER BY discovered_at ASC",
-            (STATE_COMPRESSING,),
+            "SELECT * FROM files WHERE state IN (?, ?, ?) ORDER BY discovered_at ASC",
+            (STATE_COMPRESSING, STATE_COMPRESSED, STATE_UPLOADED),
         ).fetchall()
         return [ManifestRecord.from_row(r) for r in rows]
 
