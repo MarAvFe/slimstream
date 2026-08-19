@@ -85,6 +85,31 @@ This doesn't replace the D2 nightly manifest export (still worth having, for ful
 
 **Separately, and more subtly:** because `list()` doesn't recurse, files placed *inside* `keepers` are never returned by discovery's listing call at all — `_is_under_keepers()`'s path-prefix check never actually fires on a real (flat) `Camera Uploads`, since nothing nested is ever seen in the first place. Today, on a flat library, `keepers` content is safe by construction (never listed, so never processed) — but `_is_under_keepers()` is kept anyway as **defense in depth**: if `list()` is ever made recursive (e.g. to support nested album folders), this check is what would actually stop `keepers` content from being swept into the compress pipeline, instead of relying on "list() happens not to recurse" as the only safety net. Deliberately not building recursion now — no deployer has a nested structure yet, and it would reopen the same untested-real-output risk A6 already exposed once for the flat case.
 
+### D7 — Never infer MEGAcmd semantics from POSIX; probe them (resolved 2026-08-19)
+
+Four production crashes in a row shared one root cause: assuming MEGAcmd behaves like the familiar Unix tool it resembles. Each was found by a real run failing, not by a test, because the test doubles encoded the same assumption as the code.
+
+| assumed | actually |
+|---|---|
+| `ls` FLAGS is `----` for every file | 133 of 22,146 rows are `-ep-` (exported / public link) |
+| `--time-format=ISO6081` guarantees a space-free DATE | default format emits two tokens; **0 of 22,146 rows parsed** under it |
+| `ls` on a missing path returns an empty listing | exits **53** — so `stat()` raised instead of returning `None` |
+| `mkdir -p` succeeds if the folder exists | exits **54** — so every upload crashed once the root existed |
+
+Resulting rules, all now enforced by tests:
+
+1. **Validate only fields that drive behavior.** FLAGS position 0 (the directory bit) is checked; positions 1–3 are status we never read and must not be able to fail a run. D4c's fail-loud rule means *be strict about what you consume*, not about decoration — over-validation converts harmless vendor variation into an outage.
+2. **Parse by anchor, not by field count.** The row parser locates the `H:` handle token rather than counting whitespace runs, so a one- or two-token DATE both work. Verified 22,146/22,146 under both formats, with both formats independently agreeing on 117.7 GB — that agreement is the real check, not the unit tests.
+3. **Exit codes are probed and named** (`EXIT_NOT_FOUND = 53`, `EXIT_ALREADY_EXISTS = 54`), and only the specific expected code is absorbed. Any other failure still raises: silently treating an auth or network error as "file absent" would make the pipeline redo work or, worse, believe a verify step passed.
+4. **`stat()` lists the exact path, never the parent.** Listing the parent both raised when the parent was missing (the state on every first run) and was O(folder size) per call — with ~22k files eventually in the compressed root, that is a full listing fetched and parsed for every single file processed.
+5. **Test doubles must be able to fail the way the real CLI fails.** `FakeMegaClient` politely returned `None` and no-op'd `mkdir`, so it validated the bug. Failure-mode fakes (`_FailingRun`) now cover exit 53/54 and the "unexpected error still propagates" case.
+
+`scripts/audit_library.py` re-runs the whole parser against a real account and reports any row it cannot handle. **Run it after any MEGAcmd upgrade** — it is the cheapest way to catch a format regression before a scheduled run silently discovers zero files. Measured results live in `docs/library-audit.md`.
+
+### D8 — Run summaries report successes and failures separately (resolved 2026-08-19)
+
+`JobAResult` counted every *attempt* as `processed`, so a batch in which all 20 files errored still wrote `processed=20` to `runs.log`. For an unattended pipeline whose monitoring surface is that one line, a summary that reports total failure as work done is worse than no summary. `succeeded` and `failed` are now tracked and printed separately, and `_process_one` returns whether the file reached a good terminal state.
+
 ---
 
 ## Phase 0 — The assumption gate (human-run, before any pipeline code)

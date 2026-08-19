@@ -31,8 +31,21 @@ MEGACMD_TIME_FORMAT = "ISO6081"
 _LS_HEADER_PREFIX = "FLAGS"
 
 
+# MEGAcmd exit codes, probed empirically on 2026-08-19 rather than taken
+# from docs (they aren't documented). Assuming POSIX-like semantics here
+# is exactly what broke the first two real runs: `mkdir -p` does NOT mean
+# "succeed if it already exists", and `ls` on a missing path is a hard
+# error rather than an empty listing.
+EXIT_NOT_FOUND = 53  # `Couldn't find "<path>"` — missing file OR folder
+EXIT_ALREADY_EXISTS = 54  # `Folder already exists: <name>`
+
+
 class MegaClientError(RuntimeError):
     """A mega-* command failed or its output could not be parsed."""
+
+    def __init__(self, message: str, *, returncode: int | None = None):
+        super().__init__(message)
+        self.returncode = returncode
 
 
 class MegaParseError(MegaClientError):
@@ -112,8 +125,13 @@ def _run(args: list[str], *, input_text: str | None = None, timeout: int = 300) 
         raise MegaClientError(f"timed out: {' '.join(args)}") from exc
 
     if result.returncode != 0:
+        # MEGAcmd writes its error text to stdout, not stderr, so include
+        # both — an empty "failed (exit 53):" message is useless to debug.
+        detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
         raise MegaClientError(
-            f"{' '.join(args)} failed (exit {result.returncode}): {result.stderr.strip()}"
+            f"{' '.join(args)} failed (exit {result.returncode}): "
+            f"{detail[0] if detail else '<no output>'}",
+            returncode=result.returncode,
         )
     return result.stdout
 
@@ -212,15 +230,48 @@ class MegaClient:
         return entries
 
     def stat(self, remote_path: str) -> RemoteEntry | None:
-        """Stat a single remote file. Returns None if it doesn't exist —
-        this is a normal, expected outcome (e.g. verify-before-delete
-        checks), not an error.
+        """Stat a single remote FILE. Returns None if it doesn't exist —
+        a normal, expected outcome (the already-compressed pre-check and
+        the post-upload verify both rely on it), never an exception.
+
+        Lists the exact path rather than the containing folder. Two
+        reasons, both learned the hard way:
+
+        - `mega-ls` on a missing path exits 53 rather than returning an
+          empty listing, so listing the *parent* raised whenever the
+          parent didn't exist yet — which is precisely the state on the
+          very first run, before MEGA_COMPRESSED_ROOT has been created.
+        - Listing the parent is O(folder size) per call. With the
+          compressed root eventually holding ~22k files, statting each
+          file would re-fetch and re-parse the entire listing every time.
+
+        Only meaningful for files: `mega-ls <dir>` lists a directory's
+        *contents*, so an empty directory is indistinguishable from a
+        missing one here. Every caller passes a file path.
         """
+        try:
+            output = _run(
+                [
+                    self._bin("ls"),
+                    "-l",
+                    "--show-handles",
+                    f"--time-format={MEGACMD_TIME_FORMAT}",
+                    remote_path,
+                ]
+            )
+        except MegaClientError as exc:
+            if exc.returncode == EXIT_NOT_FOUND:
+                return None
+            raise
+
         parent = remote_path.rsplit("/", 1)[0] or "/"
-        name = remote_path.rsplit("/", 1)[-1]
-        for entry in self.list(parent):
-            if entry.path.rsplit("/", 1)[-1] == name:
-                return entry
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.startswith(_LS_HEADER_PREFIX):
+                continue
+            if line.endswith(":") and "H:" not in line:
+                continue
+            return _parse_ls_line(line, parent_path=parent)
         return None
 
     def download(self, remote_path: str, local_dir: Path) -> Path:
@@ -234,11 +285,20 @@ class MegaClient:
         return local_path
 
     def mkdir_p(self, remote_dir: str) -> None:
-        """Create a remote directory, including parents, if it doesn't
-        already exist. Used before uploading into the mirrored compressed
-        tree, since MEGAcmd's `put` doesn't create missing parent folders.
+        """Create a remote directory including parents; a no-op if it
+        already exists.
+
+        MEGAcmd's `-p` creates missing parents but, unlike POSIX
+        `mkdir -p`, still exits 54 when the target itself exists —
+        assuming otherwise crashed every upload as soon as the compressed
+        root had been created once. Verified by probe on 2026-08-19.
         """
-        _run([self._bin("mkdir"), "-p", remote_dir])
+        try:
+            _run([self._bin("mkdir"), "-p", remote_dir])
+        except MegaClientError as exc:
+            if exc.returncode == EXIT_ALREADY_EXISTS:
+                return
+            raise
 
     def upload(self, local_path: Path, remote_dir: str) -> str:
         """Upload a local file to a remote directory. Returns the resulting

@@ -244,12 +244,42 @@ def test_job_a_failure_never_deletes_original(tmp_path, manifest, monkeypatch):
 
     monkeypatch.setattr(worker_mod, "transcode_image", _boom)
 
-    run_job_a(manifest, mega, config)
+    result = run_job_a(manifest, mega, config)
 
     row = manifest._conn.execute("SELECT * FROM files").fetchone()
     assert row["state"] == STATE_FAILED
     assert row["retry_count"] == 1
     assert mega.moved_to_trash == []  # Job A never touches originals' existence
+
+    # The run summary must report this as a failure, not as work done.
+    # An earlier version counted every attempt as "processed", so a batch
+    # in which all 20 files errored still read as "processed 20" in
+    # runs.log — the monitoring surface actively lying about a total
+    # failure.
+    assert result.succeeded == 0
+    assert result.failed == 1
+
+
+def test_job_a_result_separates_successes_from_failures(tmp_path, manifest, monkeypatch):
+    config = make_config(tmp_path, dry_run_upload=False)
+    mega = FakeMegaClient(_make_entries(4))
+
+    real_transcode = worker_mod.transcode_image
+    calls = {"n": 0}
+
+    def _every_other_fails(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:
+            raise RuntimeError("simulated failure")
+        return real_transcode(*args, **kwargs)
+
+    monkeypatch.setattr(worker_mod, "transcode_image", _every_other_fails)
+
+    result = run_job_a(manifest, mega, config)
+
+    assert result.succeeded == 2
+    assert result.failed == 2
+    assert result.attempted == 4
 
 
 def test_job_a_respects_pause_flag(tmp_path, manifest):

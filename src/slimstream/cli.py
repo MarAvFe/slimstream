@@ -68,9 +68,12 @@ def _append_run_summary(config: Config, line: str) -> None:
 
 def _job_a_summary_line(config: Config, result: JobAResult) -> str:
     mode = "upload=LIVE" if not config.dry_run_upload else "upload=dry-run"
+    # succeeded/failed are reported separately and never merged into one
+    # "processed" number: a batch where every file errored must not read
+    # as a batch of work done, since runs.log is the monitoring surface.
     return (
         f"job-a  {mode}  batch<={config.max_batch_size}  "
-        f"discovered={result.discovered} processed={result.processed} "
+        f"discovered={result.discovered} ok={result.succeeded} failed={result.failed} "
         f"parked={result.parked_for_retries} still_pending={result.still_pending}"
     )
 

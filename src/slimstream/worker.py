@@ -44,9 +44,14 @@ MAX_RETRIES = 5
 @dataclass(frozen=True)
 class JobAResult:
     discovered: int  # newly inserted this run (0 on a rerun over the same listing)
-    processed: int
+    succeeded: int
+    failed: int
     parked_for_retries: int
     still_pending: int
+
+    @property
+    def attempted(self) -> int:
+        return self.succeeded + self.failed
 
 
 @dataclass(frozen=True)
@@ -130,7 +135,12 @@ def _process_one(
     manifest: Manifest,
     mega: MegaClient,
     config: Config,
-) -> None:
+) -> bool:
+    """Returns True if the file reached a good terminal state for this
+    run, False if it landed in `failed`. The caller counts these
+    separately so the run summary can't report a batch of failures as
+    work done.
+    """
     scratch = config.scratch_dir
     scratch.mkdir(parents=True, exist_ok=True)
     local_input: Path | None = None
@@ -162,7 +172,7 @@ def _process_one(
             )
             manifest.transition(record.file_id, STATE_UPLOADED, node_handle=existing.node_handle)
             manifest.transition(record.file_id, STATE_VERIFIED)
-            return
+            return True
 
         local_input = mega.download(record.original_path, scratch)
 
@@ -186,7 +196,7 @@ def _process_one(
             )
             manifest.transition(record.file_id, STATE_UPLOADED, node_handle=dupe.node_handle)
             manifest.transition(record.file_id, STATE_VERIFIED, content_sha256=content_hash)
-            return
+            return True
 
         suffix = local_input.suffix.lower()
         local_output = scratch / f"{local_input.stem}_compressed{'.mp4' if record.media_type == 'video' else '.jpg'}"
@@ -243,7 +253,7 @@ def _process_one(
                 "[dry-run-upload] would upload %s to %s", upload_source, remote_compressed_path
             )
             cleanup(local_input, local_output)
-            return
+            return True
 
         mega.mkdir_p(remote_dir)
         remote_path = mega.upload(upload_source, remote_dir)
@@ -259,10 +269,12 @@ def _process_one(
 
         manifest.transition(record.file_id, STATE_UPLOADED, node_handle=stat.node_handle)
         manifest.transition(record.file_id, STATE_VERIFIED)
+        return True
 
     except Exception as exc:  # noqa: BLE001 — any failure -> failed state, never a delete
         logger.exception("processing failed for %s", record.file_id)
         manifest.transition(record.file_id, STATE_FAILED, error=str(exc))
+        return False
     finally:
         if local_input is not None:
             cleanup(local_input)
@@ -287,11 +299,12 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> JobAResul
     discovered = run_discovery(manifest, mega, config)
 
     pending = manifest.get_pending()
-    processed = 0
+    succeeded = 0
+    failed = 0
     skipped_for_retries = 0
 
     for record in pending:
-        if processed >= config.max_batch_size:
+        if succeeded + failed >= config.max_batch_size:
             break
         if record.retry_count >= MAX_RETRIES:
             logger.warning(
@@ -301,19 +314,24 @@ def run_job_a(manifest: Manifest, mega: MegaClient, config: Config) -> JobAResul
             )
             skipped_for_retries += 1
             continue
-        _process_one(record, manifest, mega, config)
-        processed += 1
+        if _process_one(record, manifest, mega, config):
+            succeeded += 1
+        else:
+            failed += 1
 
-    remaining = max(len(pending) - processed - skipped_for_retries, 0)
+    attempted = succeeded + failed
+    remaining = max(len(pending) - attempted - skipped_for_retries, 0)
     logger.info(
-        "job A: processed %d, parked %d (max retries), %d still pending for next run",
-        processed,
+        "job A: %d succeeded, %d failed, %d parked (max retries), %d still pending",
+        succeeded,
+        failed,
         skipped_for_retries,
         remaining,
     )
     return JobAResult(
         discovered=discovered,
-        processed=processed,
+        succeeded=succeeded,
+        failed=failed,
         parked_for_retries=skipped_for_retries,
         still_pending=remaining,
     )

@@ -1,17 +1,23 @@
-"""Parser tests against real captured MEGAcmd output (Phase 0 / A6 —
-IMPLEMENTATION_GUIDE.md D4c). MEGAcmd documents no stable machine-readable
-format, so this fixture is the actual ground truth, not a guess: captured
-2026-08-18 against a live account via
-`mega-ls -l --show-handles --time-format=ISO6081 /slimstream-test/`.
+"""Tests for the MEGAcmd wrapper, against real captured output and real
+probed failure semantics (Phase 0 / A6 + the 2026-08-19 full-library
+audit — IMPLEMENTATION_GUIDE.md D4c/D7). MEGAcmd documents neither its
+output format nor its exit codes, so everything asserted here is
+empirical, never inferred from how a POSIX tool would behave.
 
-Notable real-world shape this locks in:
-- FLAGS is 4 dashes for a file ("----"), not *nix ls's 10-char -rwx... form
-- DATE has no time component despite --time-format=ISO6081
+Real-world behaviour these lock in — every one of them broke a live run
+first:
+- FLAGS is 4 chars whose position 0 is the directory bit; positions 1-3
+  carry status ("-ep-" = exported/public link, 133 rows in the real
+  library) that must be tolerated, not validated
+- DATE is one token under --time-format=ISO6081 but two under the
+  default, so the parser anchors on the H: handle rather than counting
+  fields
 - NAME can contain spaces and look like a date (Pixel's own filename
-  format: "2026-08-03 10.10.48.jpg") — column splitting must account for
-  this, not split on all whitespace
-- Output leads with a "/path/:" line and a "FLAGS VERS SIZE..." header
-  line, both of which must be skipped without being mistaken for entries
+  format: "2026-08-03 10.10.48.jpg")
+- Output may lead with a "/path/:" line and a "FLAGS VERS ..." header,
+  both skipped by shape rather than by position
+- `ls` on a missing path exits 53 (not an empty listing); `mkdir -p` on
+  an existing folder exits 54 (unlike POSIX mkdir -p)
 """
 
 from __future__ import annotations
@@ -20,7 +26,14 @@ from pathlib import Path
 
 import pytest
 
-from slimstream.mega_client import MegaClient, MegaParseError, RemoteEntry
+from slimstream.mega_client import (
+    EXIT_ALREADY_EXISTS,
+    EXIT_NOT_FOUND,
+    MegaClient,
+    MegaClientError,
+    MegaParseError,
+    RemoteEntry,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -41,6 +54,21 @@ class _FakeRun:
     def __call__(self, args, **kwargs):
         self.calls.append(args)
         return self.output
+
+
+class _FailingRun:
+    """Swaps mega_client._run for one that fails the way the real CLI
+    does, with a specific exit code attached.
+    """
+
+    def __init__(self, returncode: int, message: str = "boom"):
+        self.returncode = returncode
+        self.message = message
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append(args)
+        raise MegaClientError(self.message, returncode=self.returncode)
 
 
 def test_parses_real_captured_output(monkeypatch):
@@ -247,3 +275,90 @@ def test_directory_row_with_unexpected_nonzero_size_raises(monkeypatch):
     client = MegaClient()
     with pytest.raises(MegaParseError):
         client.list("/Camera Uploads")
+
+
+# --- real-CLI failure semantics (probed 2026-08-19, see EXIT_* constants) ---
+#
+# Both behaviours below crashed real production runs. They were invisible
+# to the earlier tests because the fakes were more forgiving than MEGAcmd:
+# the fake stat() politely returned None and the fake mkdir_p was a no-op,
+# so the test doubles validated the assumption instead of the behaviour.
+
+
+def test_stat_returns_none_when_path_missing(monkeypatch):
+    """`mega-ls` on a missing path exits 53 rather than returning an empty
+    listing. stat() must absorb that into None — its documented contract —
+    instead of raising, or the very first run (before the compressed root
+    exists) fails on every single file.
+    """
+    import slimstream.mega_client as mc
+
+    failing = _FailingRun(EXIT_NOT_FOUND, 'Couldn\'t find "/pics-archive/x.jpg"')
+    monkeypatch.setattr(mc, "_run", failing)
+
+    client = MegaClient()
+    assert client.stat("/pics-archive/x.jpg") is None
+
+
+def test_stat_reraises_unexpected_failures(monkeypatch):
+    """Only 'not found' is absorbed. A different failure (auth, network,
+    quota) must still surface — silently treating those as 'file absent'
+    would make the pipeline re-do work it already did, or worse, believe a
+    verify step passed.
+    """
+    import slimstream.mega_client as mc
+
+    monkeypatch.setattr(mc, "_run", _FailingRun(9, "session expired"))
+
+    client = MegaClient()
+    with pytest.raises(MegaClientError):
+        client.stat("/pics-archive/x.jpg")
+
+
+def test_stat_lists_exact_path_not_parent_folder(monkeypatch):
+    """stat() must query the file itself. Listing the parent is both
+    wrong (raises when the parent is missing) and O(folder size) per
+    call — with ~22k files in the compressed root that is a full listing
+    fetched and parsed for every single file processed.
+    """
+    import slimstream.mega_client as mc
+
+    single_row = (
+        "FLAGS VERS      SIZE    DATE          HANDLE NAME\n"
+        "----    1       629821 2014-11-14 H:3VkDgQKJ photo.jpg\n"
+    )
+    fake = _FakeRun(single_row)
+    monkeypatch.setattr(mc, "_run", fake)
+
+    client = MegaClient()
+    entry = client.stat("/pics-archive/photo.jpg")
+
+    assert entry is not None
+    assert entry.path == "/pics-archive/photo.jpg"
+    assert entry.size == 629821
+    assert fake.calls[0][-1] == "/pics-archive/photo.jpg"  # not "/pics-archive"
+
+
+def test_mkdir_p_is_idempotent_when_folder_exists(monkeypatch):
+    """MEGAcmd's `-p` creates parents but still exits 54 if the target
+    exists — unlike POSIX `mkdir -p`. Assuming otherwise crashed every
+    upload once the compressed root had been created.
+    """
+    import slimstream.mega_client as mc
+
+    monkeypatch.setattr(
+        mc, "_run", _FailingRun(EXIT_ALREADY_EXISTS, "Folder already exists: pics-archive")
+    )
+
+    client = MegaClient()
+    client.mkdir_p("/pics-archive")  # must not raise
+
+
+def test_mkdir_p_reraises_other_failures(monkeypatch):
+    import slimstream.mega_client as mc
+
+    monkeypatch.setattr(mc, "_run", _FailingRun(9, "session expired"))
+
+    client = MegaClient()
+    with pytest.raises(MegaClientError):
+        client.mkdir_p("/pics-archive")
