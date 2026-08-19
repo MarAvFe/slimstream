@@ -1,0 +1,7 @@
+/Camera Uploads:
+FLAGS VERS      SIZE            DATE          HANDLE NAME
+d---    -            - 18Aug2026 04:57:36 H:mZ80GSKI keepers
+d---    -            - 18Aug2026 04:57:49 H:CU9y0CAJ recyclingbin
+----    1        10038 14Nov2014 16:24:15 H:6cllkZDL 2014-11-14 10.24.15_1.jpg
+----    1       629821 14Nov2014 16:24:15 H:3VkDgQKJ 2014-11-14 10.24.15.jpeg
+-ep-    1      1246296 30Oct2022 12:06:58 H:aA0GmAKK 2022-10-30 06.06.58.jpg

@@ -52,26 +52,47 @@ class RemoteEntry:
     mtime_iso: str
 
 
-# Real `mega-ls -l --show-handles` output, captured against a live account
-# (Phase 0 / A6 — confirmed real, not guessed from docs, since MEGAcmd
-# documents no stable machine-readable format):
+# Real `mega-ls -l --show-handles` output, audited against a live 22,146-file
+# account (Phase 0 / A6 + the 2026-08-19 full-library audit — confirmed
+# empirically, never guessed from docs, since MEGAcmd documents no stable
+# machine-readable format):
 #
 #   FLAGS VERS      SIZE    DATE          HANDLE NAME
 #   ----    1      3470559 2026-08-03 H:GEFhiD7K 2026-08-03 10.10.48.jpg
-#   ----    1            4 2026-08-18 H:vdElBb7Y moved.txt
+#   -ep-    1      1246296 2022-10-30 H:aA0GmAKK 2022-10-30 06.06.58.jpg
+#   d---    -            - 2026-08-18 H:mZ80GSKI keepers
 #
-# Notable, non-obvious things this format forces on the parser:
-# - FLAGS is 4 dashes for a plain file, not the 10-char `-rwx...` shape a
-#   *nix `ls -l` would suggest. Directory flags are unconfirmed — treated
-#   as unparseable (raise) rather than guessed, per D4c.
-# - DATE has no time component (`2026-08-03`), not the ISO8601-with-time
-#   the guide assumed --time-format=ISO6081 would produce.
-# - NAME can itself contain spaces and even look like a date
-#   ("2026-08-03 10.10.48.jpg" — Pixel's own default filename format),
-#   so column-count splitting must split on the first 5 whitespace runs
-#   only and take everything after HANDLE as NAME, whole.
-_LS_FLAGS_RE = re.compile(r"^[-d]{4}$")
-_LS_MIN_FIELDS = 6  # FLAGS VERS SIZE DATE HANDLE NAME(>=1 word)
+# Three things the real data forced, each of which crashed an earlier,
+# stricter version of this parser:
+#
+# 1. FLAGS is NOT always "----". The live library contains 133 rows of
+#    "-ep-" (exported / public-link files) alongside 22,011 "----" and 2
+#    "d---". Only position 0 is load-bearing here (d = directory); the
+#    remaining characters encode export/share status we never consume.
+#    Validating characters we don't use turned harmless vendor variation
+#    into a hard crash, so we now check only what we actually depend on.
+#    This is the narrow reading of D4c's fail-loud rule: be strict about
+#    fields that drive behavior, not about decoration.
+#
+# 2. DATE may be one token ("2026-08-03", with --time-format=ISO6081) or
+#    two ("18Aug2026 04:57:36", the default format). A fixed 6-field split
+#    silently depends on the former: the audit measured 0 / 22,146 lines
+#    parsing under the default format, i.e. a single flag change would
+#    make every file invisible to discovery. Anchoring on the H: handle
+#    token instead of counting fields from the left parses 22,146 / 22,146
+#    under BOTH formats.
+#
+# 3. NAME can contain spaces and can itself look like a date
+#    ("2026-08-03 10.10.48.jpg" — Pixel's own filename format), so NAME is
+#    everything after the handle, taken whole.
+_LS_LINE_RE = re.compile(
+    r"^(?P<flags>\S+)\s+"
+    r"(?P<vers>\S+)\s+"
+    r"(?P<size>\S+)\s+"
+    r"(?P<date>.*?)\s+"  # non-greedy: absorbs a 1- or 2-token date
+    r"(?P<handle>H:[A-Za-z0-9_-]+)\s+"
+    r"(?P<name>.+)$"
+)
 
 
 def _run(args: list[str], *, input_text: str | None = None, timeout: int = 300) -> str:
@@ -98,26 +119,34 @@ def _run(args: list[str], *, input_text: str | None = None, timeout: int = 300) 
 
 
 def _parse_ls_line(line: str, *, parent_path: str) -> RemoteEntry:
-    # FLAGS VERS SIZE DATE HANDLE NAME — split on the first 5 whitespace
-    # runs only, since NAME itself may contain spaces (see format notes
-    # above _LS_FLAGS_RE).
-    parts = line.split(maxsplit=5)
-    if len(parts) < _LS_MIN_FIELDS:
+    """Parse one `mega-ls -l --show-handles` row. See the format notes
+    above _LS_LINE_RE for the empirical basis of each rule.
+    """
+    match = _LS_LINE_RE.match(line)
+    if match is None:
         raise MegaParseError(f"unrecognized mega-ls line shape: {line!r}")
 
-    flags, vers, size_str, mtime, handle, name = parts
+    flags = match.group("flags")
+    size_str = match.group("size")
+    handle = match.group("handle")
+    name = match.group("name")
+    mtime = match.group("date")
 
-    if not _LS_FLAGS_RE.match(flags):
-        raise MegaParseError(f"unrecognized flags column {flags!r} in line: {line!r}")
-    if not handle.startswith("H:"):
-        raise MegaParseError(f"unrecognized handle column {handle!r} in line: {line!r}")
+    # Only position 0 of FLAGS drives behavior (d = directory). The rest
+    # ("-ep-" for exported files, etc.) is status we never consume, so it
+    # is deliberately not validated — see note 1 above _LS_LINE_RE.
+    if not flags or flags[0] not in ("-", "d"):
+        raise MegaParseError(
+            f"unrecognized flags column {flags!r} (expected leading '-' or 'd') "
+            f"in line: {line!r}"
+        )
 
     is_dir = flags[0] == "d"
 
     # Directory rows print "-" for both VERS and SIZE (confirmed real
     # output: "d---    -            - 2026-08-18 H:mZ80GSKI keepers").
-    # Files always have a real integer size; a "-" on a file row is not
-    # something we've seen and isn't guessed at — it still raises.
+    # Files always carry a real integer size; a non-integer on a file row
+    # is not something the audit ever saw, so it still fails loud.
     if is_dir:
         if size_str != "-":
             raise MegaParseError(
